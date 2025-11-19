@@ -1,5 +1,15 @@
 # Graduation Project: Smart Leading Robot
 
+## Installation
+
+Before running the scripts, you need to install the required Python libraries. You can install them using pip:
+
+```bash
+pip install opencv-python pyttsx3 ultralytics SpeechRecognition numpy streamlit PyAudio
+```
+
+## Components
+
 ### 1. Standalone Camera Classification (`classification/camera.py`)
 
 This script provides a direct, real-time video feed from the default camera. It uses voice commands to control the object detection process.
