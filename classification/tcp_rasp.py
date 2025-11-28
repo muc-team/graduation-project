@@ -9,7 +9,6 @@ socket.bind("tcp://*:5555")
 
 camera = cv2.VideoCapture(0)
 
-
 camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
 camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
@@ -20,8 +19,6 @@ while True:
     if not ret:
         continue
 
-
     encoded, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-    
 
     socket.send(buffer)
