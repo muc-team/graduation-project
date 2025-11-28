@@ -12,7 +12,7 @@ st.set_page_config(page_title="Rescue Robot", page_icon="🤖", layout="wide")
 
 @st.cache_resource
 def load_model():
-    return YOLO('../models/yolov8n-seg.pt')
+    return YOLO('../models/yolov8n.pt')
 
 if 'speech_queue' not in st.session_state:
     st.session_state['speech_queue'] = queue.Queue()

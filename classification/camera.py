@@ -7,6 +7,7 @@ import speech_recognition as sr
 
 processing_enabled = False
 last_announced_object = None
+video_port = 0
 
 
 def voice_listener():
@@ -49,7 +50,7 @@ def speak(text):
 
 model = YOLO('../models/yolov8n-seg.pt')
 
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(video_port)
 print("Camera is on... Press 'q' to quit")
 
 listener_thread = threading.Thread(target=voice_listener, daemon=True)
