@@ -1,7 +1,7 @@
 import cv2
+import time
 import socket
 import struct
-import time
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4194304)
