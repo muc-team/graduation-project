@@ -1,15 +1,14 @@
 import cv2
+import zmq
 import time
 import base64
-import socket
 import roslibpy
 import threading
 import numpy as np
 from nicegui import ui, app
 from ultralytics import YOLO
-
 RASPBERRY_IP = '192.168.1.200'
-ROS_PORT,UDP_PORT = 9090,9999
+ROS_PORT, TCP_PORT = 9090, 5555
 
 model = YOLO("../models/yolov8n.pt") 
 client = roslibpy.Ros(host=RASPBERRY_IP, port=ROS_PORT)
@@ -113,20 +112,23 @@ def update_connection_status():
 
 def video_stream_loop():
     global latest_frame_b64, frame_counter
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2097152)
     
-    bound = False
-    while not bound:
+    context = zmq.Context()
+    socket = context.socket(zmq.SUB)
+    socket.setsockopt(zmq.CONFLATE, 1)
+    socket.setsockopt_string(zmq.SUBSCRIBE, '')
+    
+    connected = False
+    while not connected:
         try:
-            sock.bind(('0.0.0.0', UDP_PORT))
-            bound = True
-        except OSError:
+            socket.connect(f"tcp://{RASPBERRY_IP}:{TCP_PORT}")
+            connected = True
+        except Exception:
             time.sleep(1)
 
     while True:
         try:
-            data, _ = sock.recvfrom(65536)
+            data = socket.recv()
             nparr = np.frombuffer(data, np.uint8)
             frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 

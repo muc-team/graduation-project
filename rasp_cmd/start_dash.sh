@@ -14,12 +14,12 @@ ros2 launch rosbridge_server rosbridge_websocket_launch.xml;
 exec bash"
 
 gnome-terminal --tab --title="CAMERA STREAM" -- bash -c "
-if [ -f ../classification/udp_rasp.py ]; then
-    python3 ../classification/udp_rasp.py;
-elif [ -f udp_rasp.py ]; then
-    python3 udp_rasp.py;
+if [ -f ../classification/tcp_rasp.py ]; then
+    python3 ../classification/tcp_rasp.py;
+elif [ -f tcp_rasp.py ]; then
+    python3 tcp_rasp.py;
 else
-    echo 'Error: udp_rasp.py not found!';
+    echo 'Error: tcp_rasp.py not found!';
 fi;
 exec bash"
 
