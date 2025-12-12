@@ -6,7 +6,7 @@ from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
-    cwd = os.getcwd()
+    cwd = os.path.dirname(os.path.abspath(__file__))
     slam_params_file = os.path.join(cwd, 'mapper.yaml')
     rviz_config_file = os.path.join(cwd, 'config.rviz')
 
