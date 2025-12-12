@@ -8,12 +8,11 @@ import numpy as np
 from nicegui import ui, app
 from ultralytics import YOLO
 
-RASPBERRY_IP_ROS = '192.168.1.19'
-ROS_PORT = 9090
-UDP_PORT = 9999
+RASPBERRY_IP = '192.168.1.200'
+ROS_PORT,UDP_PORT = 9090,9999
 
 model = YOLO("../models/yolov8n.pt")
-client = roslibpy.Ros(host=RASPBERRY_IP_ROS, port=ROS_PORT)
+client = roslibpy.Ros(host=RASPBERRY_IP, port=ROS_PORT)
 
 status_label = None
 video_image = None
@@ -127,7 +126,7 @@ def main_page():
                 ui.separator().classes('my-2 bg-gray-700')
                 with ui.row().classes('items-center'):
                     ui.icon('wifi', size='24px').classes('text-gray-400')
-                    ui.label(f'{RASPBERRY_IP_ROS}:{UDP_PORT}').classes('text-gray-400 text-sm')
+                    ui.label(f'{RASPBERRY_IP}:{UDP_PORT}').classes('text-gray-400 text-sm')
 
             with ui.card().style(card_style).classes('w-full flex-grow'):
                 ui.label('Incident Report / Logs').classes('text-lg text-red-400 font-bold')

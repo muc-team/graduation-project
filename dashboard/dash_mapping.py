@@ -8,9 +8,8 @@ import numpy as np
 from nicegui import ui, app
 from ultralytics import YOLO
 
-RASPBERRY_IP = '192.168.1.15'
-ROS_PORT = 9090
-UDP_PORT = 9999
+RASPBERRY_IP = '192.168.1.200'
+ROS_PORT,UDP_PORT = 9090,9999
 
 model = YOLO("../models/yolov8n.pt") 
 client = roslibpy.Ros(host=RASPBERRY_IP, port=ROS_PORT)

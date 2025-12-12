@@ -4,7 +4,7 @@ import socket
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 2097152)
 
-LAPTOP_IP = "192.168.1.12"
+LAPTOP_IP = "192.168.1.201"
 PORT = 9999
 
 cap = cv2.VideoCapture(0)

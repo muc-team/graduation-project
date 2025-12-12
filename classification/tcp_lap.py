@@ -4,8 +4,8 @@ import numpy as np
 from ultralytics import YOLO
 
 model = YOLO("../models/yolov8n.pt")
-ip_address = "192.168.1.18"
-port = 5555
+RASPBERRY_IP = "192.168.1.200"
+PORT = 5555
 
 context = zmq.Context()
 socket = context.socket(zmq.SUB)
@@ -14,7 +14,7 @@ socket.setsockopt(zmq.CONFLATE, 1)
 
 socket.setsockopt_string(zmq.SUBSCRIBE, '')
 
-socket.connect(f"tcp://{ip_address}:{port}")
+socket.connect(f"tcp://{RASPBERRY_IP}:{PORT}")
 
 print("Waiting for images...")
 
