@@ -1,52 +1,41 @@
 #!/usr/bin/env python3
 """
-Professional Robot Control Dashboard - Fixed Version
-=====================================================
-Fixes:
-- Continuous command sending while button held
-- Better map visualization
-- Working clear button
-- Autonomous mode toggle
+Professional Robot Dashboard - Final Version
 """
 
 import cv2
 import zmq
 import time
-import json
 import base64
 import roslibpy
 import threading
 import numpy as np
 from nicegui import ui
 from ultralytics import YOLO
-from datetime import datetime
 
-# ============== Configuration ==============
+# Config
 ROBOT_HOST = 'robot.local'
 ROS_PORT = 9090
 VIDEO_PORT = 5555
 
-# ============== State ==============
-class RobotState:
-    def __init__(self):
-        self.connected = False
-        self.mapping_active = True
-        self.autonomous_mode = False
-        self.emergency_stopped = False
-        self.current_action = "Ready"
-        self.linear_speed = 0.2
-        self.angular_speed = 0.5
-        self.latest_frame = None
-        self.latest_map = None
-        self.frame_count = 0
-        self.map_count = 0
-        self.last_cmd = 'S'
-        self.button_held = False
-        self.held_command = None
+# State
+class State:
+    connected = False
+    mapping_active = False  # Starts OFF
+    autonomous = False
+    emergency = False
+    action = "Ready"
+    speed = 0.2
+    frame = None
+    map_img = None
+    frame_count = 0
+    map_count = 0
+    button_held = False
+    held_cmd = None
 
-state = RobotState()
+state = State()
 
-# ============== ROS Connection ==============
+# ROS
 client = None
 manual_topic = None
 estop_topic = None
@@ -54,352 +43,265 @@ explore_topic = None
 
 def init_ros():
     global client, manual_topic, estop_topic, explore_topic
-    
     client = roslibpy.Ros(host=ROBOT_HOST, port=ROS_PORT)
     
     def on_ready():
         global manual_topic, estop_topic, explore_topic
-        print("✅ Connected to ROS!")
         state.connected = True
+        print("✅ ROS Connected")
         
         manual_topic = roslibpy.Topic(client, '/manual_cmd', 'geometry_msgs/Twist')
         manual_topic.advertise()
-        
         estop_topic = roslibpy.Topic(client, '/emergency_stop', 'std_msgs/Bool')
         estop_topic.advertise()
-        
         explore_topic = roslibpy.Topic(client, '/explore_enable', 'std_msgs/Bool')
         explore_topic.advertise()
         
-        map_topic = roslibpy.Topic(client, '/map', 'nav_msgs/OccupancyGrid')
-        map_topic.subscribe(map_callback)
-    
-    def on_close(event):
-        state.connected = False
+        roslibpy.Topic(client, '/map', 'nav_msgs/OccupancyGrid').subscribe(on_map)
     
     client.on_ready(on_ready)
-    client.on('close', on_close)
+    client.on('close', lambda e: setattr(state, 'connected', False))
     
-    def run_ros():
+    def run():
         while True:
             try:
                 if not client.is_connected:
                     client.run()
-            except:
-                pass
+            except: pass
             time.sleep(2)
-    
-    threading.Thread(target=run_ros, daemon=True).start()
+    threading.Thread(target=run, daemon=True).start()
 
-def map_callback(msg):
+def on_map(msg):
     if not state.mapping_active:
         return
     try:
-        width = msg['info']['width']
-        height = msg['info']['height']
-        data = np.array(msg['data'], dtype=np.int8).reshape((height, width))
+        w, h = msg['info']['width'], msg['info']['height']
+        data = np.array(msg['data'], dtype=np.int8).reshape((h, w))
         
-        # Better colors
-        img = np.full((height, width, 3), 30, dtype=np.uint8)
-        img[data == 0] = [255, 255, 255]     # Free = white
-        img[data == 100] = [60, 60, 220]     # Occupied = red
-        img[data == -1] = [50, 50, 50]       # Unknown = dark gray
+        # Professional color scheme
+        img = np.zeros((h, w, 3), dtype=np.uint8)
+        img[data == -1] = [35, 35, 45]       # Unknown - dark
+        img[data == 0] = [240, 245, 250]     # Free - light
+        img[data == 100] = [80, 80, 200]     # Wall - red
         
         img = np.flipud(img)
         
-        # Scale to larger size
-        target_size = 500
-        scale = max(1, target_size // max(width, height))
-        img = cv2.resize(img, (width * scale, height * scale), interpolation=cv2.INTER_NEAREST)
+        # Scale
+        scale = max(2, 600 // max(w, h))
+        img = cv2.resize(img, (w*scale, h*scale), interpolation=cv2.INTER_NEAREST)
         
-        # Draw robot (green dot in center)
-        cx, cy = img.shape[1] // 2, img.shape[0] // 2
-        cv2.circle(img, (cx, cy), 12, (0, 200, 0), -1)
-        cv2.circle(img, (cx, cy), 14, (0, 255, 0), 2)
+        # Robot marker
+        cx, cy = img.shape[1]//2, img.shape[0]//2
+        cv2.circle(img, (cx, cy), 15, (50, 200, 50), -1)
+        cv2.circle(img, (cx, cy), 18, (100, 255, 100), 3)
         
-        # Add border
-        img = cv2.copyMakeBorder(img, 5, 5, 5, 5, cv2.BORDER_CONSTANT, value=(100, 100, 100))
+        # Direction arrow
+        cv2.arrowedLine(img, (cx, cy), (cx, cy-25), (100, 255, 100), 3, tipLength=0.4)
         
-        _, buffer = cv2.imencode('.png', img)
-        state.latest_map = f'data:image/png;base64,{base64.b64encode(buffer).decode()}'
+        _, buf = cv2.imencode('.png', img)
+        state.map_img = f'data:image/png;base64,{base64.b64encode(buf).decode()}'
         state.map_count += 1
-    except:
-        pass
+    except: pass
 
-# ============== Video Stream ==============
-print("Loading YOLO model...")
+# Video
+print("Loading YOLO...")
 model = YOLO("../models/yolov8n.pt")
-print("✅ YOLO loaded!")
+print("✅ YOLO Ready")
 
 def video_loop():
-    context = zmq.Context()
-    socket = context.socket(zmq.SUB)
-    socket.setsockopt(zmq.CONFLATE, 1)
-    socket.setsockopt_string(zmq.SUBSCRIBE, '')
-    socket.setsockopt(zmq.RCVTIMEO, 5000)
+    ctx = zmq.Context()
+    sock = ctx.socket(zmq.SUB)
+    sock.setsockopt(zmq.CONFLATE, 1)
+    sock.setsockopt_string(zmq.SUBSCRIBE, '')
+    sock.setsockopt(zmq.RCVTIMEO, 5000)
     
     while True:
         try:
-            socket.connect(f"tcp://{ROBOT_HOST}:{VIDEO_PORT}")
-            print(f"📷 Camera connected")
+            sock.connect(f"tcp://{ROBOT_HOST}:{VIDEO_PORT}")
+            print("📷 Camera Ready")
             break
-        except:
-            time.sleep(1)
+        except: time.sleep(1)
     
     while True:
         try:
-            data = socket.recv()
+            data = sock.recv()
             frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
             if frame is not None:
                 results = model(frame, verbose=False, conf=0.5)
                 annotated = results[0].plot()
-                
-                mode = "AUTO" if state.autonomous_mode else "MANUAL"
-                color = (0, 255, 0) if state.autonomous_mode else (255, 200, 0)
-                cv2.putText(annotated, mode, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
-                
-                _, buffer = cv2.imencode('.jpg', annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                state.latest_frame = f'data:image/jpeg;base64,{base64.b64encode(buffer).decode()}'
+                _, buf = cv2.imencode('.jpg', annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                state.frame = f'data:image/jpeg;base64,{base64.b64encode(buf).decode()}'
                 state.frame_count += 1
-        except:
-            time.sleep(0.1)
+        except: time.sleep(0.1)
 
 threading.Thread(target=video_loop, daemon=True).start()
 
-# ============== Control Functions ==============
-def send_cmd(linear=0.0, angular=0.0):
-    if manual_topic and state.connected and not state.emergency_stopped:
-        msg = {'linear': {'x': linear, 'y': 0, 'z': 0}, 'angular': {'x': 0, 'y': 0, 'z': angular}}
-        manual_topic.publish(roslibpy.Message(msg))
+# Control
+def send_cmd(l=0.0, a=0.0):
+    if manual_topic and state.connected and not state.emergency:
+        manual_topic.publish(roslibpy.Message({'linear':{'x':l,'y':0,'z':0},'angular':{'x':0,'y':0,'z':a}}))
 
-def execute_command(cmd):
-    """Execute a movement command"""
-    if cmd == 'F': send_cmd(state.linear_speed, 0)
-    elif cmd == 'B': send_cmd(-state.linear_speed, 0)
-    elif cmd == 'L': send_cmd(0, state.angular_speed)
-    elif cmd == 'R': send_cmd(0, -state.angular_speed)
+def exec_cmd(cmd):
+    if cmd == 'F': send_cmd(state.speed, 0)
+    elif cmd == 'B': send_cmd(-state.speed, 0)
+    elif cmd == 'L': send_cmd(0, 0.5)
+    elif cmd == 'R': send_cmd(0, -0.5)
     else: send_cmd(0, 0)
 
-def start_move(cmd, action):
+def start(cmd, txt):
     state.button_held = True
-    state.held_command = cmd
-    state.current_action = action
-    state.last_cmd = cmd
+    state.held_cmd = cmd
+    state.action = txt
 
-def stop_move():
+def stop():
     state.button_held = False
-    state.held_command = None
-    state.current_action = "Stopped"
-    state.last_cmd = 'S'
+    state.held_cmd = None
+    state.action = "Ready"
     send_cmd(0, 0)
 
-def emergency_stop():
-    state.emergency_stopped = True
-    state.current_action = "🚨 EMERGENCY!"
-    if estop_topic:
-        estop_topic.publish(roslibpy.Message({'data': True}))
+def estop():
+    state.emergency = True
+    state.action = "🛑 EMERGENCY"
+    if estop_topic: estop_topic.publish(roslibpy.Message({'data': True}))
     send_cmd(0, 0)
 
-def release_emergency():
-    state.emergency_stopped = False
-    state.current_action = "Ready"
-    if estop_topic:
-        estop_topic.publish(roslibpy.Message({'data': False}))
+def release():
+    state.emergency = False
+    state.action = "Ready"
+    if estop_topic: estop_topic.publish(roslibpy.Message({'data': False}))
 
-def toggle_autonomous(enabled):
-    state.autonomous_mode = enabled
-    if explore_topic:
-        explore_topic.publish(roslibpy.Message({'data': enabled}))
-    state.current_action = "Autonomous ON" if enabled else "Manual"
+def toggle_auto(v):
+    state.autonomous = v
+    if explore_topic: explore_topic.publish(roslibpy.Message({'data': v}))
+    state.action = "AUTO ON" if v else "Manual"
 
-def toggle_mapping(enabled):
-    state.mapping_active = enabled
-    state.current_action = "Mapping ON" if enabled else "Mapping OFF"
+def toggle_map(v):
+    state.mapping_active = v
+    state.action = "Mapping..." if v else "Mapping OFF"
 
 def clear_map():
-    state.latest_map = None
+    state.map_img = None
     state.map_count = 0
-    ui.notify('Map cleared (visual only)')
 
-# ============== Continuous Command Loop ==============
-def command_loop():
-    """Send commands continuously while button is held"""
+# Command loop
+def cmd_loop():
     while True:
-        if state.button_held and state.held_command:
-            execute_command(state.held_command)
-        time.sleep(0.1)  # Send every 100ms
+        if state.button_held and state.held_cmd:
+            exec_cmd(state.held_cmd)
+        time.sleep(0.1)
+threading.Thread(target=cmd_loop, daemon=True).start()
 
-threading.Thread(target=command_loop, daemon=True).start()
-
-# ============== GUI ==============
-ui.add_head_html('''
-<style>
-    body { background: linear-gradient(135deg, #0d1117 0%, #161b22 100%); }
-    .glass { 
-        background: rgba(22, 27, 34, 0.95); 
-        border: 1px solid rgba(255,255,255,0.1);
-        border-radius: 16px;
-    }
-    .btn {
-        width: 70px !important; height: 70px !important;
-        font-size: 28px !important; border-radius: 14px !important;
-        transition: all 0.1s !important;
-        user-select: none !important;
-    }
-    .btn:active { transform: scale(0.9); }
-</style>
-''')
+# GUI
+ui.add_head_html('<style>body{background:#0d1117;}.card{background:rgba(22,27,34,0.95);border:1px solid rgba(255,255,255,0.1);border-radius:16px;}.btn{width:70px!important;height:70px!important;font-size:28px!important;border-radius:14px!important;}</style>')
 
 with ui.row().classes('w-full min-h-screen p-4 gap-4'):
     
-    # ============== LEFT - Controls ==============
-    with ui.column().classes('w-80 gap-3'):
+    # Left
+    with ui.column().classes('w-72 gap-3'):
+        with ui.card().classes('card p-4'):
+            with ui.row().classes('items-center gap-2'):
+                ui.icon('smart_toy', size='28px').classes('text-blue-400')
+                ui.label('RESCUE ROBOT').classes('text-lg font-bold text-white')
+            with ui.row().classes('items-center gap-2 mt-2'):
+                conn_icon = ui.icon('circle', size='10px').classes('text-red-500')
+                conn_text = ui.label('Connecting...').classes('text-sm text-gray-400')
         
-        # Header
-        with ui.card().classes('glass p-4'):
-            with ui.row().classes('items-center gap-3'):
-                ui.icon('smart_toy', size='32px').classes('text-blue-400')
-                with ui.column().classes('gap-0'):
-                    ui.label('RESCUE ROBOT').classes('text-xl font-bold text-white')
-                    with ui.row().classes('items-center gap-2'):
-                        conn_icon = ui.icon('circle', size='10px').classes('text-red-500')
-                        conn_text = ui.label('Connecting...').classes('text-sm text-gray-400')
-        
-        # Status
-        with ui.card().classes('glass p-4'):
-            ui.label('STATUS').classes('text-xs text-gray-500 font-bold mb-1')
+        with ui.card().classes('card p-4'):
             action_label = ui.label('Ready').classes('text-2xl font-bold text-cyan-400')
         
-        # Control Pad
-        with ui.card().classes('glass p-6'):
-            ui.label('CONTROLS (Hold to move)').classes('text-xs text-gray-500 font-bold mb-3 text-center w-full')
+        with ui.card().classes('card p-5'):
+            ui.label('Hold to move').classes('text-xs text-gray-500 mb-3 text-center w-full')
+            with ui.column().classes('items-center gap-1'):
+                f = ui.button('▲').classes('btn bg-blue-600')
+                f.on('mousedown', lambda: start('F', '▲')); f.on('mouseup', stop); f.on('mouseleave', stop)
+                with ui.row().classes('gap-1'):
+                    l = ui.button('◀').classes('btn bg-blue-600'); l.on('mousedown', lambda: start('L', '◀')); l.on('mouseup', stop); l.on('mouseleave', stop)
+                    ui.button('■', on_click=stop).classes('btn bg-gray-700')
+                    r = ui.button('▶').classes('btn bg-blue-600'); r.on('mousedown', lambda: start('R', '▶')); r.on('mouseup', stop); r.on('mouseleave', stop)
+                b = ui.button('▼').classes('btn bg-blue-600'); b.on('mousedown', lambda: start('B', '▼')); b.on('mouseup', stop); b.on('mouseleave', stop)
             
-            with ui.column().classes('items-center gap-2'):
-                fwd = ui.button('▲').classes('btn bg-blue-600 text-white')
-                fwd.on('mousedown', lambda: start_move('F', '▲ Forward'))
-                fwd.on('mouseup', stop_move)
-                fwd.on('mouseleave', stop_move)
-                
-                with ui.row().classes('gap-2'):
-                    left = ui.button('◀').classes('btn bg-blue-600 text-white')
-                    left.on('mousedown', lambda: start_move('L', '◀ Left'))
-                    left.on('mouseup', stop_move)
-                    left.on('mouseleave', stop_move)
-                    
-                    ui.button('■', on_click=stop_move).classes('btn bg-gray-700 text-white')
-                    
-                    right = ui.button('▶').classes('btn bg-blue-600 text-white')
-                    right.on('mousedown', lambda: start_move('R', '▶ Right'))
-                    right.on('mouseup', stop_move)
-                    right.on('mouseleave', stop_move)
-                
-                back = ui.button('▼').classes('btn bg-blue-600 text-white')
-                back.on('mousedown', lambda: start_move('B', '▼ Backward'))
-                back.on('mouseup', stop_move)
-                back.on('mouseleave', stop_move)
-            
-            # Speed
-            ui.label('Speed').classes('text-gray-400 text-sm mt-4')
-            speed_slider = ui.slider(min=0.1, max=0.5, step=0.05, value=0.2).classes('w-full')
-            speed_label = ui.label('0.20 m/s').classes('text-cyan-400 text-sm')
-            speed_slider.on('change', lambda: (setattr(state, 'linear_speed', speed_slider.value), speed_label.set_text(f'{speed_slider.value:.2f} m/s')))
+            ui.label('Speed').classes('text-gray-400 text-sm mt-3')
+            slider = ui.slider(min=0.1, max=0.5, step=0.05, value=0.2).classes('w-full')
+            slider.on('change', lambda: setattr(state, 'speed', slider.value))
         
-        # Modes
-        with ui.card().classes('glass p-4'):
-            ui.label('MODES').classes('text-xs text-gray-500 font-bold mb-2')
-            with ui.row().classes('items-center justify-between w-full mb-2'):
+        with ui.card().classes('card p-3'):
+            with ui.row().classes('justify-between items-center w-full'):
                 ui.label('Mapping').classes('text-white')
-                ui.switch(value=True, on_change=lambda e: toggle_mapping(e.value))
-            with ui.row().classes('items-center justify-between w-full'):
+                ui.switch(on_change=lambda e: toggle_map(e.value))
+            with ui.row().classes('justify-between items-center w-full mt-2'):
                 ui.label('Autonomous').classes('text-white')
-                ui.switch(on_change=lambda e: toggle_autonomous(e.value))
+                ui.switch(on_change=lambda e: toggle_auto(e.value))
         
-        # Emergency
-        with ui.card().classes('glass p-4 border border-red-600/50'):
+        with ui.card().classes('card p-3 border border-red-600/50'):
             with ui.row().classes('gap-2 w-full'):
-                ui.button('🛑 STOP', on_click=emergency_stop).classes('flex-grow bg-red-600 text-white font-bold')
-                ui.button('✓', on_click=release_emergency).classes('bg-green-600 text-white')
+                ui.button('🛑 STOP', on_click=estop).classes('flex-grow bg-red-600 font-bold')
+                ui.button('✓', on_click=release).classes('bg-green-600')
     
-    # ============== CENTER - Video ==============
+    # Center - Video
     with ui.column().classes('flex-grow gap-3'):
-        with ui.card().classes('glass p-3 h-full'):
-            with ui.row().classes('justify-between items-center mb-2'):
-                ui.label('📹 LIVE + YOLO').classes('text-white font-bold')
-                fps_label = ui.label('-- FPS').classes('text-green-400')
-            video_img = ui.image().classes('w-full bg-black rounded-lg').style('max-height: 75vh; object-fit: contain;')
+        with ui.card().classes('card p-3 h-full'):
+            with ui.row().classes('justify-between mb-2'):
+                ui.label('📹 LIVE').classes('text-white font-bold')
+                fps = ui.label('--').classes('text-green-400')
+            video = ui.image().classes('w-full rounded-lg').style('max-height:75vh;object-fit:contain;')
     
-    # ============== RIGHT - Map ==============
-    with ui.column().classes('w-[550px] gap-3'):
-        with ui.card().classes('glass p-4 h-full'):
+    # Right - Map
+    with ui.column().classes('w-[600px] gap-3'):
+        with ui.card().classes('card p-4 h-full'):
             with ui.row().classes('justify-between items-center mb-3'):
                 ui.label('🗺️ SLAM MAP').classes('text-white font-bold text-xl')
-                map_count_label = ui.label('--').classes('text-green-400')
+                map_count = ui.label('OFF').classes('text-gray-400')
             
-            # Map container with fixed size
-            with ui.element('div').classes('w-full bg-gray-900 rounded-lg flex items-center justify-center').style('height: 500px; overflow: hidden;'):
-                map_img = ui.image().classes('max-w-full max-h-full object-contain')
+            with ui.element('div').classes('w-full bg-gray-900 rounded-xl flex items-center justify-center').style('height:550px;'):
+                map_view = ui.image().classes('max-w-full max-h-full')
+                no_map = ui.label('Enable Mapping to start').classes('text-gray-500 text-lg')
             
-            # Map controls
-            with ui.row().classes('gap-2 mt-3 justify-center'):
-                ui.button('📷 Save', on_click=lambda: ui.notify('Map saved!')).classes('bg-blue-600')
+            with ui.row().classes('gap-3 mt-3 justify-center'):
                 ui.button('🗑️ Clear', on_click=clear_map).classes('bg-orange-600')
-            
-            # Info
-            with ui.row().classes('mt-3 gap-6 text-sm text-gray-400 justify-center'):
-                ui.label(f'Host: {ROBOT_HOST}')
-                ui.label(f'ROS: {ROS_PORT}')
 
-# ============== Keyboard ==============
-def handle_key(e):
+# Keyboard
+def key(e):
     if e.action.keydown:
-        if e.key in ['w', 'W', 'ArrowUp']: start_move('F', '▲ Forward')
-        elif e.key in ['s', 'S', 'ArrowDown']: start_move('B', '▼ Backward')
-        elif e.key in ['a', 'A', 'ArrowLeft']: start_move('L', '◀ Left')
-        elif e.key in ['d', 'D', 'ArrowRight']: start_move('R', '▶ Right')
-        elif e.key == ' ': stop_move()
-        elif e.key == 'Escape': emergency_stop()
+        if e.key in ['w','W','ArrowUp']: start('F','▲')
+        elif e.key in ['s','S','ArrowDown']: start('B','▼')
+        elif e.key in ['a','A','ArrowLeft']: start('L','◀')
+        elif e.key in ['d','D','ArrowRight']: start('R','▶')
+        elif e.key == ' ': stop()
+        elif e.key == 'Escape': estop()
     elif e.action.keyup:
-        if e.key in ['w','W','s','S','a','A','d','D','ArrowUp','ArrowDown','ArrowLeft','ArrowRight']:
-            stop_move()
+        if e.key in ['w','W','s','S','a','A','d','D','ArrowUp','ArrowDown','ArrowLeft','ArrowRight']: stop()
+ui.keyboard(on_key=key)
 
-ui.keyboard(on_key=handle_key)
-
-# ============== UI Update Timer ==============
-last_frame = 0
-last_time = time.time()
-
-def update_ui():
-    global last_frame, last_time
-    
-    if state.latest_frame:
-        video_img.source = state.latest_frame
-    
-    if state.latest_map:
-        map_img.source = state.latest_map
-        map_count_label.text = f'{state.map_count} updates'
+# Update
+last_f, last_t = 0, time.time()
+def update():
+    global last_f, last_t
+    if state.frame: video.source = state.frame
+    if state.map_img:
+        map_view.source = state.map_img
+        map_count.text = f'{state.map_count} updates'
+        map_count.classes(remove='text-gray-400', add='text-green-400')
+        no_map.set_visibility(False)
+    else:
+        no_map.set_visibility(True)
+        map_count.text = 'OFF' if not state.mapping_active else 'Starting...'
     
     if state.connected:
         conn_icon.classes(remove='text-red-500', add='text-green-500')
         conn_text.text = 'Connected'
-        conn_text.classes(remove='text-gray-400', add='text-green-400')
     else:
         conn_icon.classes(remove='text-green-500', add='text-red-500')
         conn_text.text = 'Disconnected'
-        conn_text.classes(remove='text-green-400', add='text-gray-400')
     
-    action_label.text = state.current_action
+    action_label.text = state.action
     
     now = time.time()
-    if now - last_time >= 1.0:
-        fps = state.frame_count - last_frame
-        fps_label.text = f'{fps} FPS'
-        last_frame = state.frame_count
-        last_time = now
+    if now - last_t >= 1:
+        fps.text = f'{state.frame_count - last_f} FPS'
+        last_f, last_t = state.frame_count, now
 
-ui.timer(0.1, update_ui)
+ui.timer(0.1, update)
 
-# Start
 init_ros()
 time.sleep(1)
-
 ui.run(title='Rescue Robot', port=8080, dark=True, reload=False)

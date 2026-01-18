@@ -64,8 +64,8 @@ class SimpleExplorer(Node):
     
     def move(self, linear=0.0, angular=0.0):
         msg = Twist()
-        msg.linear.x = linear
-        msg.angular.z = angular
+        msg.linear.x = float(linear)
+        msg.angular.z = float(angular)
         self.cmd_pub.publish(msg)
     
     def check_obstacle_ahead(self):
