@@ -39,7 +39,7 @@ def ros_connect():
         topic_estop = roslibpy.Topic(ros_client, '/emergency_stop', 'std_msgs/Bool')
         topic_estop.advertise()
         topic_explore = roslibpy.Topic(ros_client, '/explore_enable', 'std_msgs/Bool')
-        explore.advertise()
+        topic_explore.advertise()
         roslibpy.Topic(ros_client, '/map', 'nav_msgs/OccupancyGrid').subscribe(on_map)
         print("✅ ROS Connected")
     
