@@ -44,10 +44,17 @@ ros2 launch rosbridge_server rosbridge_websocket_launch.xml
 exec bash" &
 sleep 1
 
-echo "[5/5] Starting Camera..."
+echo "[5/6] Starting Camera..."
 gnome-terminal --tab --title="Camera" -- bash -c "
 cd $DIR/../classification
 python3 tcp_rasp.py 2>/dev/null || echo 'Camera not available'
+exec bash" &
+
+echo "[6/6] Starting Explorer (for Autonomous mode)..."
+gnome-terminal --tab --title="Explorer" -- bash -c "
+source /opt/ros/humble/setup.bash
+cd $DIR/../navigation
+python3 simple_explorer.py
 exec bash" &
 
 echo ""
