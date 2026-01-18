@@ -262,7 +262,7 @@ with ui.row().classes('w-full h-screen p-3 gap-3'):
                 with ui.column().classes('gap-0'):
                     ui.label('RESCUE ROBOT').classes('text-xl font-bold text-white')
                     with ui.row().classes('items-center'):
-                        conn_dot = ui.html('<span class="status-dot offline"></span>')
+                        conn_icon = ui.icon('circle', size='12px').classes('text-red-500')
                         conn_text = ui.label('Connecting...').classes('text-sm text-gray-400')
         
         # Status
@@ -395,11 +395,11 @@ def update_ui():
     
     # Connection
     if state.connected:
-        conn_dot.content = '<span class="status-dot online"></span>'
+        conn_icon.classes(remove='text-red-500', add='text-green-500')
         conn_text.text = 'Connected'
         conn_text.classes(remove='text-gray-400', add='text-green-400')
     else:
-        conn_dot.content = '<span class="status-dot offline"></span>'
+        conn_icon.classes(remove='text-green-500', add='text-red-500')
         conn_text.text = 'Disconnected'
         conn_text.classes(remove='text-green-400', add='text-gray-400')
     
