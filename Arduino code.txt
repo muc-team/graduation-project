@@ -1,0 +1,118 @@
+/*
+ * 4WD Robot - Bluetooth Control (MAX Speed & Case Insensitive)
+ * Control Keys: F/f (Forward), B/b (Backward), R/r (Right), L/l (Left), S/s (Stop)
+ * !!! تنبيه هام: يجب فصل وحدة البلوتوث عن دبابيس 0 و 1 قبل رفع الكود !!!
+ */
+
+// --- تعريف دبابيس المواتير (المضبوطة سابقاً) ---
+
+// 1. (Rear Left) شمال ورا:
+const int RL_PWM = 4;
+const int RL_IN1 = 22; 
+const int RL_IN2 = 23; 
+
+// 2. (Rear Right) يمين ورا:
+const int RR_PWM = 5;
+const int RR_IN1 = 24; 
+const int RR_IN2 = 25; 
+
+// 3. (Front Right) قدام يمين:
+const int FR_PWM = 6;
+const int FR_IN1 = 27; 
+const int FR_IN2 = 26; 
+
+// 4. (Front Left) قدام شمال:
+const int FL_PWM = 7;
+const int FL_IN1 = 29; 
+const int FL_IN2 = 28; 
+
+
+// ******* تم تعديل السرعة القصوى (255) لزيادة عزم الدوران *******
+int testSpeed = 255; 
+
+void setup() {
+  // تشغيل السيريال الأساسي (للاتصال بالبلوتوث)
+  Serial.begin(9600);
+  
+  // تعريف الدبابيس كـ Output
+  pinMode(FR_PWM, OUTPUT); pinMode(FR_IN1, OUTPUT); pinMode(FR_IN2, OUTPUT);
+  pinMode(FL_PWM, OUTPUT); pinMode(FL_IN1, OUTPUT); pinMode(FL_IN2, OUTPUT);
+  pinMode(RR_PWM, OUTPUT); pinMode(RR_IN1, OUTPUT); pinMode(RR_IN2, OUTPUT);
+  pinMode(RL_PWM, OUTPUT); pinMode(RL_IN1, OUTPUT); pinMode(RL_IN2, OUTPUT);
+
+  stopRobot(); 
+  
+  Serial.println("--- Bluetooth Robot Control Active (MAX SPEED) ---");
+  Serial.println("Commands: F/f, B/b, R/r, L/l, S/s");
+}
+
+void loop() {
+  // القراءة من منفذ البلوتوث (Serial - Pins 0/1)
+  if (Serial.available() > 0) {
+    char cmd = Serial.read();
+    
+    // تجاهل المسافات والسطور الجديدة
+    if(cmd == '\n' || cmd == '\r' || cmd == ' ') return;
+
+    // تحويل الحرف المُستقبل إلى حرف كبير (لتبسيط جملة switch)
+    cmd = toupper(cmd); 
+
+    // ******* تم تعديل الأوامر لتقبل الحروف الكبيرة فقط (بعد التحويل) *******
+    switch (cmd) {
+      case 'F': moveForward(); break;
+      case 'B': moveBackward(); break;
+      case 'L': turnLeft(); break;
+      case 'R': turnRight(); break;
+      case 'S': stopRobot(); break;
+      default:  stopRobot(); break;
+    }
+  }
+}
+
+// --- دوال الحركة (كما هي) ---
+
+void moveForward() {
+  motorGo(FR_PWM, FR_IN1, FR_IN2, testSpeed, true);
+  motorGo(FL_PWM, FL_IN1, FL_IN2, testSpeed, true);
+  motorGo(RR_PWM, RR_IN1, RR_IN2, testSpeed, true);
+  motorGo(RL_PWM, RL_IN1, RL_IN2, testSpeed, true);
+}
+
+void moveBackward() {
+  motorGo(FR_PWM, FR_IN1, FR_IN2, testSpeed, false);
+  motorGo(FL_PWM, FL_IN1, FL_IN2, testSpeed, false);
+  motorGo(RR_PWM, RR_IN1, RR_IN2, testSpeed, false);
+  motorGo(RL_PWM, RL_IN1, RL_IN2, testSpeed, false);
+}
+
+void turnLeft() {
+  motorGo(FR_PWM, FR_IN1, FR_IN2, testSpeed, true);  
+  motorGo(RR_PWM, RR_IN1, RR_IN2, testSpeed, true);  
+  motorGo(FL_PWM, FL_IN1, FL_IN2, testSpeed, false); 
+  motorGo(RL_PWM, RL_IN1, RL_IN2, testSpeed, false); 
+}
+
+void turnRight() {
+  motorGo(FL_PWM, FL_IN1, FL_IN2, testSpeed, true);  
+  motorGo(RL_PWM, RL_IN1, RL_IN2, testSpeed, true);  
+  motorGo(FR_PWM, FR_IN1, FR_IN2, testSpeed, false); 
+  motorGo(RR_PWM, RR_IN1, RR_IN2, testSpeed, false); 
+}
+
+void stopRobot() {
+  analogWrite(FR_PWM, 0); digitalWrite(FR_IN1, LOW); digitalWrite(FR_IN2, LOW);
+  analogWrite(FL_PWM, 0); digitalWrite(FL_IN1, LOW); digitalWrite(FL_IN2, LOW);
+  analogWrite(RR_PWM, 0); digitalWrite(RR_IN1, LOW); digitalWrite(RR_IN2, LOW);
+  analogWrite(RL_PWM, 0); digitalWrite(RL_IN1, LOW); digitalWrite(RL_IN2, LOW);
+}
+
+void motorGo(int pwmPin, int in1, int in2, int speed, boolean forward) {
+  analogWrite(pwmPin, speed);
+  if (forward) {
+    digitalWrite(in1, HIGH);
+    digitalWrite(in2, LOW);
+  } else {
+    digitalWrite(in1, LOW);
+    digitalWrite(in2, HIGH);
+  }
+}
