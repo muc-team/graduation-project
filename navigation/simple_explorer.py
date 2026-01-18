@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-Smart Explorer with Robot Dimensions
-Robot: 46cm x 32cm
-LiDAR: Center (16cm from front, 16cm from sides)
+Ultra Smart Explorer - Never bumps into walls
+Uses LiDAR for 360° obstacle detection
 """
 
 import rclpy
@@ -11,167 +10,158 @@ from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool
 import numpy as np
-import math
 
-# Robot Dimensions (meters)
-ROBOT_LENGTH = 0.46  # 46cm
-ROBOT_WIDTH = 0.32   # 32cm
-LIDAR_OFFSET_FRONT = 0.16  # 16cm from front
-SAFETY_MARGIN = 0.15  # 15cm extra safety
-
-# Minimum distances
-MIN_FRONT = LIDAR_OFFSET_FRONT + SAFETY_MARGIN  # 31cm
-MIN_SIDE = (ROBOT_WIDTH / 2) + SAFETY_MARGIN     # 31cm
+# Robot: 46cm x 32cm, LiDAR center
+SAFE_FRONT = 0.50   # 50cm front clearance
+SAFE_SIDE = 0.40    # 40cm side clearance
+SAFE_BACK = 0.30    # 30cm back clearance
+DANGER_ZONE = 0.25  # 25cm = too close!
 
 
-class SmartExplorer(Node):
+class UltraExplorer(Node):
     def __init__(self):
-        super().__init__('smart_explorer')
+        super().__init__('ultra_explorer')
         
-        # Parameters
-        self.linear_speed = 0.12  # Slower for safety
-        self.angular_speed = 0.4
-        
-        # State
+        self.speed = 0.10       # Slow for safety
+        self.turn_speed = 0.35
         self.enabled = False
-        self.front_clear = True
-        self.left_clear = True
-        self.right_clear = True
-        self.min_front_dist = 10.0
-        self.min_left_dist = 10.0
-        self.min_right_dist = 10.0
         
-        # Publishers
+        # Distances
+        self.front = 10.0
+        self.front_left = 10.0
+        self.front_right = 10.0
+        self.left = 10.0
+        self.right = 10.0
+        self.back = 10.0
+        
+        # Stuck detection
+        self.stuck_count = 0
+        self.last_action = None
+        
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.create_subscription(LaserScan, '/scan', self.scan_cb, 10)
+        self.create_subscription(Bool, '/explore_enable', self.enable_cb, 10)
+        self.create_timer(0.15, self.think)
         
-        # Subscribers
-        self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
-        self.enable_sub = self.create_subscription(Bool, '/explore_enable', self.enable_callback, 10)
-        
-        # Timer
-        self.timer = self.create_timer(0.2, self.explore_loop)
-        
-        self.get_logger().info('Smart Explorer Ready')
-        self.get_logger().info(f'Robot: {ROBOT_LENGTH*100}cm x {ROBOT_WIDTH*100}cm')
-        self.get_logger().info(f'Safety distances - Front: {MIN_FRONT*100}cm, Sides: {MIN_SIDE*100}cm')
+        self.get_logger().info('🤖 Ultra Explorer Ready')
+        self.get_logger().info(f'Safety: Front={SAFE_FRONT}m Side={SAFE_SIDE}m')
     
-    def enable_callback(self, msg):
+    def enable_cb(self, msg):
         self.enabled = msg.data
+        self.stuck_count = 0
         if self.enabled:
-            self.get_logger().info('🚀 Exploration ENABLED')
+            self.get_logger().info('✅ ENABLED')
         else:
-            self.get_logger().info('⏹️ Exploration DISABLED')
+            self.get_logger().info('⏹️ DISABLED')
             self.stop()
     
-    def scan_callback(self, msg):
-        """Process LiDAR scan - check all directions"""
-        ranges = np.array(msg.ranges)
-        ranges = np.where(np.isfinite(ranges), ranges, 10.0)
+    def scan_cb(self, msg):
+        """Process 360° LiDAR scan"""
+        r = np.array(msg.ranges)
+        r = np.where(np.isfinite(r) & (r > 0.1), r, 10.0)
+        n = len(r)
         
-        n = len(ranges)
+        def get_min(start_deg, end_deg):
+            s = int(n * start_deg / 360)
+            e = int(n * end_deg / 360)
+            if s < e:
+                return float(np.min(r[s:e]))
+            else:
+                return float(min(np.min(r[s:]), np.min(r[:e])))
         
-        # Front: -30° to +30° (center)
-        front_start = int(n * 330 / 360)  # -30°
-        front_end = int(n * 30 / 360)     # +30°
-        front_ranges = np.concatenate([ranges[front_start:], ranges[:front_end]])
-        self.min_front_dist = np.min(front_ranges) if len(front_ranges) > 0 else 10.0
-        
+        # Front: -45° to +45°
+        self.front = get_min(315, 45)
         # Front-Left: +30° to +60°
-        fl_start = int(n * 30 / 360)
-        fl_end = int(n * 60 / 360)
-        fl_ranges = ranges[fl_start:fl_end]
-        
+        self.front_left = get_min(30, 60)
         # Front-Right: -60° to -30° (300° to 330°)
-        fr_start = int(n * 300 / 360)
-        fr_end = int(n * 330 / 360)
-        fr_ranges = ranges[fr_start:fr_end]
-        
+        self.front_right = get_min(300, 330)
         # Left: +60° to +120°
-        left_start = int(n * 60 / 360)
-        left_end = int(n * 120 / 360)
-        left_ranges = ranges[left_start:left_end]
-        self.min_left_dist = np.min(left_ranges) if len(left_ranges) > 0 else 10.0
+        self.left = get_min(60, 120)
+        # Right: +240° to +300°
+        self.right = get_min(240, 300)
+        # Back: +135° to +225°
+        self.back = get_min(135, 225)
+    
+    def move(self, lin, ang, action=""):
+        msg = Twist()
+        msg.linear.x = float(lin)
+        msg.angular.z = float(ang)
+        self.cmd_pub.publish(msg)
         
-        # Right: -120° to -60° (240° to 300°)
-        right_start = int(n * 240 / 360)
-        right_end = int(n * 300 / 360)
-        right_ranges = ranges[right_start:right_end]
-        self.min_right_dist = np.min(right_ranges) if len(right_ranges) > 0 else 10.0
-        
-        # Check clearances
-        self.front_clear = self.min_front_dist > MIN_FRONT
-        self.left_clear = self.min_left_dist > MIN_SIDE
-        self.right_clear = self.min_right_dist > MIN_SIDE
+        if action != self.last_action:
+            self.get_logger().info(f'{action} | F:{self.front:.2f} L:{self.left:.2f} R:{self.right:.2f}')
+            self.last_action = action
     
     def stop(self):
         msg = Twist()
         self.cmd_pub.publish(msg)
     
-    def move(self, linear=0.0, angular=0.0):
-        msg = Twist()
-        msg.linear.x = float(linear)
-        msg.angular.z = float(angular)
-        self.cmd_pub.publish(msg)
-    
-    def explore_loop(self):
+    def think(self):
+        """Main decision logic"""
         if not self.enabled:
             return
         
-        # Log distances periodically
-        if hasattr(self, '_log_count'):
-            self._log_count += 1
-        else:
-            self._log_count = 0
+        # DANGER: Too close! Reverse!
+        if self.front < DANGER_ZONE:
+            self.get_logger().warn(f'⚠️ DANGER! Front={self.front:.2f}m - REVERSING')
+            self.move(-self.speed, 0, "🔙 REVERSE")
+            self.stuck_count += 1
+            return
         
-        if self._log_count % 25 == 0:  # Every 5 seconds
-            self.get_logger().info(f'Dist: F={self.min_front_dist:.2f}m L={self.min_left_dist:.2f}m R={self.min_right_dist:.2f}m')
+        # Check if stuck (same action too many times)
+        if self.stuck_count > 20:
+            self.get_logger().warn('🔄 Stuck! Random turn...')
+            import random
+            self.move(0, random.choice([-1, 1]) * self.turn_speed * 2, "🔄 UNSTICK")
+            self.stuck_count = 0
+            return
         
-        # Decision making
-        if self.min_front_dist < 0.20:  # Very close! Reverse
-            self.get_logger().warn('⚠️ Too close! Reversing...')
-            self.move(-self.linear_speed, 0.0)
-        
-        elif not self.front_clear:
-            # Obstacle ahead - turn
-            if self.right_clear and not self.left_clear:
-                self.move(0.0, -self.angular_speed)  # Turn right
-            elif self.left_clear and not self.right_clear:
-                self.move(0.0, self.angular_speed)   # Turn left
-            elif self.right_clear:
-                self.move(0.0, -self.angular_speed)  # Default: turn right
-            elif self.left_clear:
-                self.move(0.0, self.angular_speed)   # Turn left
-            else:
-                # Stuck! Reverse and turn
-                self.move(-self.linear_speed, self.angular_speed)
-        
-        else:
-            # Front clear - move forward
-            # Adjust slightly away from close walls
-            angular = 0.0
-            if self.min_left_dist < MIN_SIDE * 1.5:
-                angular = -0.1  # Veer right
-            elif self.min_right_dist < MIN_SIDE * 1.5:
-                angular = 0.1   # Veer left
+        # FRONT BLOCKED
+        if self.front < SAFE_FRONT:
+            self.stuck_count += 1
             
-            self.move(self.linear_speed, angular)
-    
-    def destroy_node(self):
-        self.stop()
-        super().destroy_node()
+            # Decide turn direction
+            if self.right > self.left and self.right > SAFE_SIDE:
+                self.move(0, -self.turn_speed, "↪️ Turn RIGHT")
+            elif self.left > SAFE_SIDE:
+                self.move(0, self.turn_speed, "↩️ Turn LEFT")
+            elif self.right > self.left:
+                self.move(0, -self.turn_speed, "↪️ Force RIGHT")
+            else:
+                self.move(0, self.turn_speed, "↩️ Force LEFT")
+            return
+        
+        # SIDES TOO CLOSE - Adjust
+        if self.left < SAFE_SIDE * 0.7:
+            self.move(self.speed * 0.5, -0.2, "➡️ Veer right")
+            return
+        
+        if self.right < SAFE_SIDE * 0.7:
+            self.move(self.speed * 0.5, 0.2, "⬅️ Veer left")
+            return
+        
+        # CLEAR - Go forward
+        self.stuck_count = 0
+        
+        # Slight curve towards more open side
+        curve = 0.0
+        if self.front_left > self.front_right + 0.3:
+            curve = 0.1  # Curve left
+        elif self.front_right > self.front_left + 0.3:
+            curve = -0.1  # Curve right
+        
+        self.move(self.speed, curve, "⬆️ FORWARD")
 
 
-def main(args=None):
-    rclpy.init(args=args)
-    node = SmartExplorer()
+def main():
+    rclpy.init()
+    node = UltraExplorer()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
-
+    node.destroy_node()
+    rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
