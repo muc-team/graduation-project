@@ -21,7 +21,7 @@ const int FL_PWM = 7, FL_IN1 = 29, FL_IN2 = 28;
 const int DEFAULT_SPEED = 180;
 const int MIN_SPEED = 80;
 const int MAX_SPEED = 255;
-const unsigned long TIMEOUT_MS = 500;
+const unsigned long TIMEOUT_MS = 2000;  // 2 seconds (was 500ms)
 
 // State
 int targetSpeed = DEFAULT_SPEED;
