@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
-Ultra Smart Explorer - Never bumps into walls
-Uses LiDAR for 360° obstacle detection
+ULTRA SAFE Explorer - NEVER BUMPS
+Robot: 46cm x 32cm
+LiDAR at center (16cm from front, 16cm from sides)
+
+SAFETY DISTANCES:
+- Front: 60cm (very conservative)
+- Sides: 50cm
+- If anything closer than 30cm: REVERSE IMMEDIATELY
 """
 
 import rclpy
@@ -11,157 +17,144 @@ from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool
 import numpy as np
 
-# Robot: 46cm x 32cm, LiDAR center
-SAFE_FRONT = 0.50   # 50cm front clearance
-SAFE_SIDE = 0.40    # 40cm side clearance
-SAFE_BACK = 0.30    # 30cm back clearance
-DANGER_ZONE = 0.25  # 25cm = too close!
+# ULTRA SAFE distances
+FRONT_SAFE = 0.60      # 60cm before any obstacle
+SIDE_SAFE = 0.50       # 50cm from sides
+EMERGENCY_DIST = 0.30  # 30cm = STOP AND REVERSE
+SPEED = 0.08           # Very slow
+TURN_SPEED = 0.3
 
 
-class UltraExplorer(Node):
+class UltraSafeExplorer(Node):
     def __init__(self):
-        super().__init__('ultra_explorer')
+        super().__init__('ultra_safe_explorer')
         
-        self.speed = 0.10       # Slow for safety
-        self.turn_speed = 0.35
         self.enabled = False
-        
-        # Distances
         self.front = 10.0
-        self.front_left = 10.0
-        self.front_right = 10.0
         self.left = 10.0
         self.right = 10.0
-        self.back = 10.0
-        
-        # Stuck detection
-        self.stuck_count = 0
-        self.last_action = None
+        self.front_left = 10.0
+        self.front_right = 10.0
         
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.create_subscription(LaserScan, '/scan', self.scan_cb, 10)
         self.create_subscription(Bool, '/explore_enable', self.enable_cb, 10)
-        self.create_timer(0.15, self.think)
+        self.create_timer(0.2, self.navigate)
         
-        self.get_logger().info('🤖 Ultra Explorer Ready')
-        self.get_logger().info(f'Safety: Front={SAFE_FRONT}m Side={SAFE_SIDE}m')
+        self.log('Ultra Safe Explorer Started')
+        self.log(f'SAFETY: Front={FRONT_SAFE}m Side={SIDE_SAFE}m Emergency={EMERGENCY_DIST}m')
+    
+    def log(self, msg):
+        self.get_logger().info(msg)
     
     def enable_cb(self, msg):
         self.enabled = msg.data
-        self.stuck_count = 0
-        if self.enabled:
-            self.get_logger().info('✅ ENABLED')
-        else:
-            self.get_logger().info('⏹️ DISABLED')
+        self.log(f'Explorer {"ENABLED" if self.enabled else "DISABLED"}')
+        if not self.enabled:
             self.stop()
     
     def scan_cb(self, msg):
-        """Process 360° LiDAR scan"""
+        """Read LiDAR - all directions"""
         r = np.array(msg.ranges)
-        r = np.where(np.isfinite(r) & (r > 0.1), r, 10.0)
+        r = np.where(np.isfinite(r) & (r > 0.05) & (r < 12.0), r, 12.0)
         n = len(r)
+        if n == 0:
+            return
         
-        def get_min(start_deg, end_deg):
-            s = int(n * start_deg / 360)
-            e = int(n * end_deg / 360)
-            if s < e:
-                return float(np.min(r[s:e]))
+        def min_range(deg_start, deg_end):
+            s = int(n * deg_start / 360) % n
+            e = int(n * deg_end / 360) % n
+            if s <= e:
+                section = r[s:e]
             else:
-                return float(min(np.min(r[s:]), np.min(r[:e])))
+                section = np.concatenate([r[s:], r[:e]])
+            return float(np.min(section)) if len(section) > 0 else 12.0
         
-        # Front: -45° to +45°
-        self.front = get_min(315, 45)
-        # Front-Left: +30° to +60°
-        self.front_left = get_min(30, 60)
-        # Front-Right: -60° to -30° (300° to 330°)
-        self.front_right = get_min(300, 330)
-        # Left: +60° to +120°
-        self.left = get_min(60, 120)
-        # Right: +240° to +300°
-        self.right = get_min(240, 300)
-        # Back: +135° to +225°
-        self.back = get_min(135, 225)
-    
-    def move(self, lin, ang, action=""):
-        msg = Twist()
-        msg.linear.x = float(lin)
-        msg.angular.z = float(ang)
-        self.cmd_pub.publish(msg)
+        # FRONT: -40 to +40 degrees (wide cone)
+        self.front = min(min_range(320, 360), min_range(0, 40))
         
-        if action != self.last_action:
-            self.get_logger().info(f'{action} | F:{self.front:.2f} L:{self.left:.2f} R:{self.right:.2f}')
-            self.last_action = action
+        # FRONT-LEFT: +25 to +55
+        self.front_left = min_range(25, 55)
+        
+        # FRONT-RIGHT: -55 to -25 (305 to 335)
+        self.front_right = min_range(305, 335)
+        
+        # LEFT: +55 to +110
+        self.left = min_range(55, 110)
+        
+        # RIGHT: -110 to -55 (250 to 305)
+        self.right = min_range(250, 305)
     
     def stop(self):
         msg = Twist()
         self.cmd_pub.publish(msg)
     
-    def think(self):
-        """Main decision logic"""
+    def move(self, linear, angular):
+        msg = Twist()
+        msg.linear.x = float(linear)
+        msg.angular.z = float(angular)
+        self.cmd_pub.publish(msg)
+    
+    def navigate(self):
         if not self.enabled:
             return
         
-        # DANGER: Too close! Reverse!
-        if self.front < DANGER_ZONE:
-            self.get_logger().warn(f'⚠️ DANGER! Front={self.front:.2f}m - REVERSING')
-            self.move(-self.speed, 0, "🔙 REVERSE")
-            self.stuck_count += 1
+        # Log every 5 seconds
+        if not hasattr(self, '_cnt'):
+            self._cnt = 0
+        self._cnt += 1
+        if self._cnt % 25 == 0:
+            self.log(f'F:{self.front:.2f} FL:{self.front_left:.2f} FR:{self.front_right:.2f} L:{self.left:.2f} R:{self.right:.2f}')
+        
+        # EMERGENCY: Something very close!
+        if self.front < EMERGENCY_DIST:
+            self.log(f'🚨 EMERGENCY REVERSE! Front={self.front:.2f}m')
+            self.move(-SPEED, 0)
             return
         
-        # Check if stuck (same action too many times)
-        if self.stuck_count > 20:
-            self.get_logger().warn('🔄 Stuck! Random turn...')
-            import random
-            self.move(0, random.choice([-1, 1]) * self.turn_speed * 2, "🔄 UNSTICK")
-            self.stuck_count = 0
+        if self.front_left < EMERGENCY_DIST or self.left < EMERGENCY_DIST * 0.8:
+            self.log(f'🚨 Too close on LEFT! Turning right...')
+            self.move(0, -TURN_SPEED)
             return
         
-        # FRONT BLOCKED
-        if self.front < SAFE_FRONT:
-            self.stuck_count += 1
-            
-            # Decide turn direction
-            if self.right > self.left and self.right > SAFE_SIDE:
-                self.move(0, -self.turn_speed, "↪️ Turn RIGHT")
-            elif self.left > SAFE_SIDE:
-                self.move(0, self.turn_speed, "↩️ Turn LEFT")
-            elif self.right > self.left:
-                self.move(0, -self.turn_speed, "↪️ Force RIGHT")
+        if self.front_right < EMERGENCY_DIST or self.right < EMERGENCY_DIST * 0.8:
+            self.log(f'🚨 Too close on RIGHT! Turning left...')
+            self.move(0, TURN_SPEED)
+            return
+        
+        # BLOCKED FRONT: Turn to clearer side
+        if self.front < FRONT_SAFE:
+            if self.right > self.left:
+                self.move(0, -TURN_SPEED)
             else:
-                self.move(0, self.turn_speed, "↩️ Force LEFT")
+                self.move(0, TURN_SPEED)
             return
         
-        # SIDES TOO CLOSE - Adjust
-        if self.left < SAFE_SIDE * 0.7:
-            self.move(self.speed * 0.5, -0.2, "➡️ Veer right")
+        # BLOCKED FRONT-LEFT
+        if self.front_left < SIDE_SAFE:
+            self.move(SPEED * 0.5, -0.15)  # Slow forward, veer right
             return
         
-        if self.right < SAFE_SIDE * 0.7:
-            self.move(self.speed * 0.5, 0.2, "⬅️ Veer left")
+        # BLOCKED FRONT-RIGHT
+        if self.front_right < SIDE_SAFE:
+            self.move(SPEED * 0.5, 0.15)  # Slow forward, veer left
             return
         
-        # CLEAR - Go forward
-        self.stuck_count = 0
-        
-        # Slight curve towards more open side
-        curve = 0.0
-        if self.front_left > self.front_right + 0.3:
-            curve = 0.1  # Curve left
-        elif self.front_right > self.front_left + 0.3:
-            curve = -0.1  # Curve right
-        
-        self.move(self.speed, curve, "⬆️ FORWARD")
+        # ALL CLEAR - go forward
+        self.move(SPEED, 0)
 
 
 def main():
     rclpy.init()
-    node = UltraExplorer()
+    node = UltraSafeExplorer()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
+    node.stop()
     node.destroy_node()
     rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()
