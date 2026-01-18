@@ -1,67 +1,221 @@
 #!/usr/bin/env python3
 """
-Robot Control - Desktop Application
-Uses PyQt6 for native desktop UI
+Robot Control - Tkinter Desktop App
+Built-in Python GUI - no extra dependencies
 """
 
-import sys
+import tkinter as tk
+from tkinter import ttk
+from PIL import Image, ImageTk
 import cv2
 import zmq
 import time
 import threading
 import numpy as np
 import roslibpy
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                              QHBoxLayout, QLabel, QPushButton, QSlider, QFrame,
-                              QGridLayout, QCheckBox, QGroupBox)
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
-from PyQt6.QtGui import QImage, QPixmap, QFont, QKeyEvent
 from ultralytics import YOLO
 
 ROBOT = 'robot.local'
 
 
-class RobotState(QObject):
-    update_signal = pyqtSignal()
-    
+class RobotApp:
     def __init__(self):
-        super().__init__()
+        self.root = tk.Tk()
+        self.root.title("Rescue Robot Control")
+        self.root.configure(bg='#0d1117')
+        self.root.state('zoomed')  # Maximized
+        
+        # State
         self.connected = False
-        self.mapping = False
-        self.autonomous = False
+        self.mapping = tk.BooleanVar(value=False)
+        self.autonomous = tk.BooleanVar(value=False)
         self.emergency = False
         self.speed = 0.15
+        self.held_key = None
         self.video_frame = None
         self.map_frame = None
         self.fps = 0
         self.action = "Ready"
-
-
-class RobotController:
-    def __init__(self, state):
-        self.state = state
+        
+        # ROS
         self.ros = None
         self.manual_topic = None
         self.estop_topic = None
         self.explore_topic = None
-        self.held_key = None
         
-    def connect(self):
-        def run():
-            while True:
-                try:
-                    self.ros = roslibpy.Ros(host=ROBOT, port=9090)
-                    self.ros.on_ready(self.on_ready)
-                    self.ros.run()
-                except Exception as e:
-                    print(f"ROS connection error: {e}")
-                    self.state.connected = False
-                time.sleep(3)
-        threading.Thread(target=run, daemon=True).start()
+        # YOLO
+        print("Loading YOLO...")
+        self.yolo = YOLO("../models/yolov8n.pt")
+        print("✅ YOLO Ready")
+        
+        self.setup_ui()
+        self.bind_keys()
+        self.start_threads()
+        
+        # Update loop
+        self.update_display()
+        self.command_loop()
+        
+        self.root.mainloop()
     
-    def on_ready(self):
+    def setup_ui(self):
+        style = ttk.Style()
+        style.theme_use('clam')
+        style.configure('TFrame', background='#0d1117')
+        style.configure('TLabel', background='#0d1117', foreground='white')
+        style.configure('TButton', padding=10)
+        style.configure('TCheckbutton', background='#0d1117', foreground='white')
+        
+        main = ttk.Frame(self.root)
+        main.pack(fill='both', expand=True, padx=10, pady=10)
+        
+        # LEFT Panel
+        left = ttk.Frame(main)
+        left.pack(side='left', fill='y', padx=(0, 10))
+        
+        # Status
+        status_frame = ttk.LabelFrame(left, text="STATUS", padding=10)
+        status_frame.pack(fill='x', pady=(0, 10))
+        
+        self.status_label = ttk.Label(status_frame, text="Ready", font=('Arial', 18, 'bold'))
+        self.status_label.pack()
+        
+        self.conn_label = ttk.Label(status_frame, text="● Connecting...", foreground='red')
+        self.conn_label.pack()
+        
+        # Controls
+        ctrl_frame = ttk.LabelFrame(left, text="CONTROLS", padding=10)
+        ctrl_frame.pack(fill='x', pady=(0, 10))
+        
+        btn_style = {'width': 5, 'font': ('Arial', 16)}
+        
+        self.btn_f = tk.Button(ctrl_frame, text="▲", bg='#1f6feb', fg='white', **btn_style)
+        self.btn_f.grid(row=0, column=1, padx=2, pady=2)
+        
+        self.btn_l = tk.Button(ctrl_frame, text="◀", bg='#1f6feb', fg='white', **btn_style)
+        self.btn_l.grid(row=1, column=0, padx=2, pady=2)
+        
+        self.btn_s = tk.Button(ctrl_frame, text="■", bg='#484f58', fg='white', **btn_style, command=self.stop)
+        self.btn_s.grid(row=1, column=1, padx=2, pady=2)
+        
+        self.btn_r = tk.Button(ctrl_frame, text="▶", bg='#1f6feb', fg='white', **btn_style)
+        self.btn_r.grid(row=1, column=2, padx=2, pady=2)
+        
+        self.btn_b = tk.Button(ctrl_frame, text="▼", bg='#1f6feb', fg='white', **btn_style)
+        self.btn_b.grid(row=2, column=1, padx=2, pady=2)
+        
+        # Button bindings
+        for btn, key in [(self.btn_f, 'F'), (self.btn_l, 'L'), (self.btn_r, 'R'), (self.btn_b, 'B')]:
+            btn.bind('<ButtonPress-1>', lambda e, k=key: self.key_press(k))
+            btn.bind('<ButtonRelease-1>', lambda e: self.key_release())
+        
+        # Speed
+        speed_frame = ttk.LabelFrame(left, text="SPEED", padding=10)
+        speed_frame.pack(fill='x', pady=(0, 10))
+        
+        self.speed_slider = ttk.Scale(speed_frame, from_=0.1, to=0.3, value=0.15, 
+                                       command=lambda v: setattr(self, 'speed', float(v)))
+        self.speed_slider.pack(fill='x')
+        self.speed_label = ttk.Label(speed_frame, text="0.15 m/s")
+        self.speed_label.pack()
+        
+        # Modes
+        mode_frame = ttk.LabelFrame(left, text="MODES", padding=10)
+        mode_frame.pack(fill='x', pady=(0, 10))
+        
+        ttk.Checkbutton(mode_frame, text="Mapping", variable=self.mapping).pack(anchor='w')
+        ttk.Checkbutton(mode_frame, text="Autonomous", variable=self.autonomous,
+                        command=self.toggle_autonomous).pack(anchor='w')
+        
+        # Emergency
+        emerg_frame = ttk.LabelFrame(left, text="EMERGENCY", padding=10)
+        emerg_frame.pack(fill='x')
+        
+        tk.Button(emerg_frame, text="🛑 STOP", bg='#da3633', fg='white', font=('Arial', 12, 'bold'),
+                  command=self.emergency_stop).pack(side='left', expand=True, fill='x', padx=(0, 5))
+        tk.Button(emerg_frame, text="✓", bg='#238636', fg='white', font=('Arial', 12),
+                  command=self.release_emergency).pack(side='left')
+        
+        # CENTER: Video
+        center = ttk.Frame(main)
+        center.pack(side='left', fill='both', expand=True, padx=(0, 10))
+        
+        video_frame = ttk.LabelFrame(center, text="LIVE CAMERA + YOLO", padding=5)
+        video_frame.pack(fill='both', expand=True)
+        
+        self.video_canvas = tk.Canvas(video_frame, bg='#161b22', highlightthickness=0)
+        self.video_canvas.pack(fill='both', expand=True)
+        
+        self.fps_label_vid = ttk.Label(video_frame, text="-- FPS", foreground='#3fb950')
+        self.fps_label_vid.pack()
+        
+        # RIGHT: Map
+        right = ttk.Frame(main)
+        right.pack(side='left', fill='both', expand=True)
+        
+        map_frame = ttk.LabelFrame(right, text="SLAM MAP", padding=5)
+        map_frame.pack(fill='both', expand=True)
+        
+        self.map_canvas = tk.Canvas(map_frame, bg='#161b22', highlightthickness=0)
+        self.map_canvas.pack(fill='both', expand=True)
+        
+        self.map_text = self.map_canvas.create_text(250, 200, text="Enable Mapping", 
+                                                     fill='#484f58', font=('Arial', 14))
+        
+        tk.Button(map_frame, text="🗑️ Clear", bg='#f0883e', fg='white',
+                  command=self.clear_map).pack(pady=5)
+    
+    def bind_keys(self):
+        self.root.bind('<KeyPress-w>', lambda e: self.key_press('F'))
+        self.root.bind('<KeyPress-W>', lambda e: self.key_press('F'))
+        self.root.bind('<KeyPress-Up>', lambda e: self.key_press('F'))
+        
+        self.root.bind('<KeyPress-s>', lambda e: self.key_press('B'))
+        self.root.bind('<KeyPress-S>', lambda e: self.key_press('B'))
+        self.root.bind('<KeyPress-Down>', lambda e: self.key_press('B'))
+        
+        self.root.bind('<KeyPress-a>', lambda e: self.key_press('L'))
+        self.root.bind('<KeyPress-A>', lambda e: self.key_press('L'))
+        self.root.bind('<KeyPress-Left>', lambda e: self.key_press('L'))
+        
+        self.root.bind('<KeyPress-d>', lambda e: self.key_press('R'))
+        self.root.bind('<KeyPress-D>', lambda e: self.key_press('R'))
+        self.root.bind('<KeyPress-Right>', lambda e: self.key_press('R'))
+        
+        self.root.bind('<KeyRelease-w>', lambda e: self.key_release())
+        self.root.bind('<KeyRelease-W>', lambda e: self.key_release())
+        self.root.bind('<KeyRelease-s>', lambda e: self.key_release())
+        self.root.bind('<KeyRelease-S>', lambda e: self.key_release())
+        self.root.bind('<KeyRelease-a>', lambda e: self.key_release())
+        self.root.bind('<KeyRelease-A>', lambda e: self.key_release())
+        self.root.bind('<KeyRelease-d>', lambda e: self.key_release())
+        self.root.bind('<KeyRelease-D>', lambda e: self.key_release())
+        self.root.bind('<KeyRelease-Up>', lambda e: self.key_release())
+        self.root.bind('<KeyRelease-Down>', lambda e: self.key_release())
+        self.root.bind('<KeyRelease-Left>', lambda e: self.key_release())
+        self.root.bind('<KeyRelease-Right>', lambda e: self.key_release())
+        
+        self.root.bind('<space>', lambda e: self.stop())
+        self.root.bind('<Escape>', lambda e: self.emergency_stop())
+    
+    def start_threads(self):
+        threading.Thread(target=self.ros_thread, daemon=True).start()
+        threading.Thread(target=self.video_thread, daemon=True).start()
+    
+    def ros_thread(self):
+        while True:
+            try:
+                self.ros = roslibpy.Ros(host=ROBOT, port=9090)
+                self.ros.on_ready(self.on_ros_ready)
+                self.ros.run()
+            except Exception as e:
+                print(f"ROS error: {e}")
+                self.connected = False
+            time.sleep(3)
+    
+    def on_ros_ready(self):
         print("✅ ROS Connected")
-        self.state.connected = True
+        self.connected = True
         
         self.manual_topic = roslibpy.Topic(self.ros, '/manual_cmd', 'geometry_msgs/Twist')
         self.manual_topic.advertise()
@@ -76,7 +230,7 @@ class RobotController:
         map_topic.subscribe(self.on_map)
     
     def on_map(self, msg):
-        if not self.state.mapping:
+        if not self.mapping.get():
             return
         try:
             w = msg['info']['width']
@@ -90,71 +244,21 @@ class RobotController:
             
             img = np.flipud(img)
             
-            # Scale
             scale = max(2, 500 // max(w, h))
             img = cv2.resize(img, (w*scale, h*scale), interpolation=cv2.INTER_NEAREST)
             
-            # Robot marker
+            # Robot
             cx, cy = img.shape[1]//2, img.shape[0]//2
             cv2.rectangle(img, (cx-15, cy-20), (cx+15, cy+20), (0, 180, 0), -1)
             cv2.rectangle(img, (cx-15, cy-20), (cx+15, cy+20), (0, 255, 0), 2)
             pts = np.array([[cx, cy-30], [cx-10, cy-15], [cx+10, cy-15]], np.int32)
             cv2.fillPoly(img, [pts], (0, 255, 255))
             
-            self.state.map_frame = img
-            self.state.update_signal.emit()
+            self.map_frame = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         except Exception as e:
             print(f"Map error: {e}")
     
-    def send_twist(self, linear, angular):
-        if self.manual_topic and self.state.connected and not self.state.emergency:
-            self.manual_topic.publish(roslibpy.Message({
-                'linear': {'x': linear, 'y': 0, 'z': 0},
-                'angular': {'x': 0, 'y': 0, 'z': angular}
-            }))
-    
-    def stop(self):
-        self.held_key = None
-        self.send_twist(0, 0)
-        self.state.action = "Stopped"
-    
-    def emergency_stop(self):
-        self.state.emergency = True
-        self.state.action = "🛑 EMERGENCY"
-        if self.estop_topic:
-            self.estop_topic.publish(roslibpy.Message({'data': True}))
-        self.send_twist(0, 0)
-    
-    def release_emergency(self):
-        self.state.emergency = False
-        self.state.action = "Ready"
-        if self.estop_topic:
-            self.estop_topic.publish(roslibpy.Message({'data': False}))
-    
-    def set_autonomous(self, enabled):
-        self.state.autonomous = enabled
-        if self.explore_topic:
-            self.explore_topic.publish(roslibpy.Message({'data': enabled}))
-        self.state.action = "AUTO" if enabled else "Manual"
-    
-    def execute_key(self):
-        if self.held_key == 'F':
-            self.send_twist(self.state.speed, 0)
-        elif self.held_key == 'B':
-            self.send_twist(-self.state.speed, 0)
-        elif self.held_key == 'L':
-            self.send_twist(0, 0.5)
-        elif self.held_key == 'R':
-            self.send_twist(0, -0.5)
-
-
-class VideoThread(threading.Thread):
-    def __init__(self, state):
-        super().__init__(daemon=True)
-        self.state = state
-        self.yolo = YOLO("../models/yolov8n.pt")
-        
-    def run(self):
+    def video_thread(self):
         ctx = zmq.Context()
         sock = ctx.socket(zmq.SUB)
         sock.setsockopt(zmq.CONFLATE, 1)
@@ -179,279 +283,113 @@ class VideoThread(threading.Thread):
                 if frame is not None:
                     results = self.yolo(frame, verbose=False, conf=0.5)
                     annotated = results[0].plot()
-                    self.state.video_frame = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+                    self.video_frame = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
                     fc += 1
                     
                     now = time.time()
                     if now - lt >= 1:
-                        self.state.fps = fc
+                        self.fps = fc
                         fc = 0
                         lt = now
-                    
-                    self.state.update_signal.emit()
             except:
                 time.sleep(0.05)
-
-
-class MainWindow(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.state = RobotState()
-        self.controller = RobotController(self.state)
-        
-        self.setWindowTitle("Rescue Robot Control")
-        self.setStyleSheet("""
-            QMainWindow { background: #0d1117; }
-            QLabel { color: white; }
-            QGroupBox { 
-                color: white; 
-                border: 1px solid #30363d; 
-                border-radius: 8px; 
-                padding: 15px;
-                margin-top: 10px;
-                background: #161b22;
-            }
-            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
-            QPushButton { 
-                background: #238636; 
-                color: white; 
-                border: none; 
-                padding: 10px 20px; 
-                border-radius: 6px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background: #2ea043; }
-            QPushButton:pressed { background: #1a7f37; }
-            QPushButton#stop { background: #da3633; }
-            QPushButton#stop:hover { background: #f85149; }
-            QCheckBox { color: white; }
-            QSlider::groove:horizontal { background: #30363d; height: 8px; border-radius: 4px; }
-            QSlider::handle:horizontal { background: #58a6ff; width: 20px; margin: -6px 0; border-radius: 10px; }
-        """)
-        
-        self.setup_ui()
-        self.state.update_signal.connect(self.update_display)
-        
-        # Timers
-        self.cmd_timer = QTimer()
-        self.cmd_timer.timeout.connect(self.send_command)
-        self.cmd_timer.start(80)
-        
-        self.controller.connect()
-        VideoThread(self.state).start()
     
-    def setup_ui(self):
-        central = QWidget()
-        self.setCentralWidget(central)
-        layout = QHBoxLayout(central)
-        layout.setSpacing(15)
-        layout.setContentsMargins(15, 15, 15, 15)
-        
-        # LEFT: Controls
-        left = QVBoxLayout()
-        left.setSpacing(10)
-        
-        # Status
-        status_group = QGroupBox("STATUS")
-        status_layout = QVBoxLayout(status_group)
-        self.status_label = QLabel("Ready")
-        self.status_label.setFont(QFont("Arial", 24, QFont.Weight.Bold))
-        self.status_label.setStyleSheet("color: #58a6ff;")
-        status_layout.addWidget(self.status_label)
-        self.conn_label = QLabel("Connecting...")
-        self.conn_label.setStyleSheet("color: #f85149;")
-        status_layout.addWidget(self.conn_label)
-        left.addWidget(status_group)
-        
-        # Controls
-        ctrl_group = QGroupBox("CONTROLS")
-        ctrl_layout = QGridLayout(ctrl_group)
-        
-        self.btn_f = QPushButton("▲")
-        self.btn_f.setFixedSize(60, 60)
-        self.btn_f.setFont(QFont("Arial", 24))
-        self.btn_f.setStyleSheet("background: #1f6feb;")
-        
-        self.btn_l = QPushButton("◀")
-        self.btn_l.setFixedSize(60, 60)
-        self.btn_l.setFont(QFont("Arial", 24))
-        self.btn_l.setStyleSheet("background: #1f6feb;")
-        
-        self.btn_s = QPushButton("■")
-        self.btn_s.setFixedSize(60, 60)
-        self.btn_s.setFont(QFont("Arial", 24))
-        self.btn_s.setStyleSheet("background: #484f58;")
-        
-        self.btn_r = QPushButton("▶")
-        self.btn_r.setFixedSize(60, 60)
-        self.btn_r.setFont(QFont("Arial", 24))
-        self.btn_r.setStyleSheet("background: #1f6feb;")
-        
-        self.btn_b = QPushButton("▼")
-        self.btn_b.setFixedSize(60, 60)
-        self.btn_b.setFont(QFont("Arial", 24))
-        self.btn_b.setStyleSheet("background: #1f6feb;")
-        
-        ctrl_layout.addWidget(self.btn_f, 0, 1)
-        ctrl_layout.addWidget(self.btn_l, 1, 0)
-        ctrl_layout.addWidget(self.btn_s, 1, 1)
-        ctrl_layout.addWidget(self.btn_r, 1, 2)
-        ctrl_layout.addWidget(self.btn_b, 2, 1)
-        
-        self.btn_f.pressed.connect(lambda: self.key_press('F'))
-        self.btn_f.released.connect(self.key_release)
-        self.btn_l.pressed.connect(lambda: self.key_press('L'))
-        self.btn_l.released.connect(self.key_release)
-        self.btn_r.pressed.connect(lambda: self.key_press('R'))
-        self.btn_r.released.connect(self.key_release)
-        self.btn_b.pressed.connect(lambda: self.key_press('B'))
-        self.btn_b.released.connect(self.key_release)
-        self.btn_s.clicked.connect(self.controller.stop)
-        
-        left.addWidget(ctrl_group)
-        
-        # Speed
-        speed_group = QGroupBox("SPEED")
-        speed_layout = QVBoxLayout(speed_group)
-        self.speed_slider = QSlider(Qt.Orientation.Horizontal)
-        self.speed_slider.setRange(10, 30)
-        self.speed_slider.setValue(15)
-        self.speed_slider.valueChanged.connect(lambda v: setattr(self.state, 'speed', v/100))
-        speed_layout.addWidget(self.speed_slider)
-        self.speed_label = QLabel("0.15 m/s")
-        self.speed_slider.valueChanged.connect(lambda v: self.speed_label.setText(f"{v/100:.2f} m/s"))
-        speed_layout.addWidget(self.speed_label)
-        left.addWidget(speed_group)
-        
-        # Toggles
-        toggle_group = QGroupBox("MODES")
-        toggle_layout = QVBoxLayout(toggle_group)
-        self.map_check = QCheckBox("Mapping")
-        self.map_check.stateChanged.connect(lambda s: setattr(self.state, 'mapping', s == 2))
-        toggle_layout.addWidget(self.map_check)
-        self.auto_check = QCheckBox("Autonomous")
-        self.auto_check.stateChanged.connect(lambda s: self.controller.set_autonomous(s == 2))
-        toggle_layout.addWidget(self.auto_check)
-        left.addWidget(toggle_group)
-        
-        # Emergency
-        emergency_group = QGroupBox("EMERGENCY")
-        emergency_layout = QHBoxLayout(emergency_group)
-        self.stop_btn = QPushButton("🛑 STOP")
-        self.stop_btn.setObjectName("stop")
-        self.stop_btn.clicked.connect(self.controller.emergency_stop)
-        emergency_layout.addWidget(self.stop_btn)
-        self.release_btn = QPushButton("✓ Release")
-        self.release_btn.clicked.connect(self.controller.release_emergency)
-        emergency_layout.addWidget(self.release_btn)
-        left.addWidget(emergency_group)
-        
-        left.addStretch()
-        layout.addLayout(left)
-        
-        # CENTER: Video
-        video_group = QGroupBox("LIVE CAMERA + YOLO")
-        video_layout = QVBoxLayout(video_group)
-        self.video_label = QLabel()
-        self.video_label.setMinimumSize(640, 480)
-        self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.video_label.setStyleSheet("background: #0d1117; border-radius: 8px;")
-        video_layout.addWidget(self.video_label)
-        self.fps_label = QLabel("-- FPS")
-        self.fps_label.setStyleSheet("color: #3fb950;")
-        video_layout.addWidget(self.fps_label)
-        layout.addWidget(video_group, stretch=2)
-        
-        # RIGHT: Map
-        map_group = QGroupBox("SLAM MAP")
-        map_layout = QVBoxLayout(map_group)
-        self.map_label = QLabel("Enable Mapping")
-        self.map_label.setMinimumSize(500, 400)
-        self.map_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.map_label.setStyleSheet("background: #161b22; border-radius: 8px;")
-        map_layout.addWidget(self.map_label)
-        
-        clear_btn = QPushButton("🗑️ Clear")
-        clear_btn.clicked.connect(self.clear_map)
-        map_layout.addWidget(clear_btn)
-        
-        layout.addWidget(map_group, stretch=2)
+    def send_twist(self, linear, angular):
+        if self.manual_topic and self.connected and not self.emergency:
+            self.manual_topic.publish(roslibpy.Message({
+                'linear': {'x': linear, 'y': 0, 'z': 0},
+                'angular': {'x': 0, 'y': 0, 'z': angular}
+            }))
     
     def key_press(self, key):
-        self.controller.held_key = key
-        self.state.action = f"Moving {key}"
+        self.held_key = key
+        self.action = f"Moving {key}"
     
     def key_release(self):
-        self.controller.stop()
+        self.held_key = None
+        self.action = "Stopped"
+        self.send_twist(0, 0)
     
-    def send_command(self):
-        if self.controller.held_key:
-            self.controller.execute_key()
+    def stop(self):
+        self.held_key = None
+        self.action = "Stopped"
+        self.send_twist(0, 0)
+    
+    def emergency_stop(self):
+        self.emergency = True
+        self.action = "🛑 EMERGENCY"
+        if self.estop_topic:
+            self.estop_topic.publish(roslibpy.Message({'data': True}))
+        self.send_twist(0, 0)
+    
+    def release_emergency(self):
+        self.emergency = False
+        self.action = "Ready"
+        if self.estop_topic:
+            self.estop_topic.publish(roslibpy.Message({'data': False}))
+    
+    def toggle_autonomous(self):
+        if self.explore_topic:
+            self.explore_topic.publish(roslibpy.Message({'data': self.autonomous.get()}))
+        self.action = "AUTO" if self.autonomous.get() else "Manual"
     
     def clear_map(self):
-        self.state.map_frame = None
-        self.map_label.setText("Map Cleared")
+        self.map_frame = None
+    
+    def command_loop(self):
+        if self.held_key:
+            if self.held_key == 'F':
+                self.send_twist(self.speed, 0)
+            elif self.held_key == 'B':
+                self.send_twist(-self.speed, 0)
+            elif self.held_key == 'L':
+                self.send_twist(0, 0.5)
+            elif self.held_key == 'R':
+                self.send_twist(0, -0.5)
+        
+        self.root.after(80, self.command_loop)
     
     def update_display(self):
-        # Video
-        if self.state.video_frame is not None:
-            h, w, c = self.state.video_frame.shape
-            qimg = QImage(self.state.video_frame.data, w, h, w*c, QImage.Format.Format_RGB888)
-            scaled = qimg.scaled(self.video_label.size(), Qt.AspectRatioMode.KeepAspectRatio)
-            self.video_label.setPixmap(QPixmap.fromImage(scaled))
-        
-        # Map
-        if self.state.map_frame is not None:
-            img = cv2.cvtColor(self.state.map_frame, cv2.COLOR_BGR2RGB)
-            h, w, c = img.shape
-            qimg = QImage(img.data, w, h, w*c, QImage.Format.Format_RGB888)
-            scaled = qimg.scaled(self.map_label.size(), Qt.AspectRatioMode.KeepAspectRatio)
-            self.map_label.setPixmap(QPixmap.fromImage(scaled))
-        
-        # Status
-        self.status_label.setText(self.state.action)
-        if self.state.connected:
-            self.conn_label.setText("● Connected")
-            self.conn_label.setStyleSheet("color: #3fb950;")
+        # Update status
+        self.status_label.config(text=self.action)
+        if self.connected:
+            self.conn_label.config(text="● Connected", foreground='#3fb950')
         else:
-            self.conn_label.setText("● Disconnected")
-            self.conn_label.setStyleSheet("color: #f85149;")
+            self.conn_label.config(text="● Disconnected", foreground='red')
         
-        self.fps_label.setText(f"{self.state.fps} FPS")
+        self.fps_label_vid.config(text=f"{self.fps} FPS")
+        self.speed_label.config(text=f"{self.speed:.2f} m/s")
+        
+        # Update video
+        if self.video_frame is not None:
+            self.show_frame(self.video_canvas, self.video_frame)
+        
+        # Update map
+        if self.map_frame is not None:
+            self.map_canvas.delete(self.map_text)
+            self.show_frame(self.map_canvas, self.map_frame)
+        
+        self.root.after(100, self.update_display)
     
-    def keyPressEvent(self, event: QKeyEvent):
-        if event.isAutoRepeat():
+    def show_frame(self, canvas, frame):
+        cw = canvas.winfo_width()
+        ch = canvas.winfo_height()
+        if cw <= 1 or ch <= 1:
             return
-        key = event.key()
-        if key in [Qt.Key.Key_W, Qt.Key.Key_Up]:
-            self.key_press('F')
-        elif key in [Qt.Key.Key_S, Qt.Key.Key_Down]:
-            self.key_press('B')
-        elif key in [Qt.Key.Key_A, Qt.Key.Key_Left]:
-            self.key_press('L')
-        elif key in [Qt.Key.Key_D, Qt.Key.Key_Right]:
-            self.key_press('R')
-        elif key == Qt.Key.Key_Space:
-            self.controller.stop()
-        elif key == Qt.Key.Key_Escape:
-            self.controller.emergency_stop()
-    
-    def keyReleaseEvent(self, event: QKeyEvent):
-        if event.isAutoRepeat():
-            return
-        key = event.key()
-        if key in [Qt.Key.Key_W, Qt.Key.Key_Up, Qt.Key.Key_S, Qt.Key.Key_Down,
-                   Qt.Key.Key_A, Qt.Key.Key_Left, Qt.Key.Key_D, Qt.Key.Key_Right]:
-            self.controller.stop()
-
-
-def main():
-    print("Loading YOLO model...")
-    app = QApplication(sys.argv)
-    window = MainWindow()
-    window.showMaximized()
-    sys.exit(app.exec())
+        
+        h, w = frame.shape[:2]
+        scale = min(cw/w, ch/h)
+        new_w, new_h = int(w*scale), int(h*scale)
+        
+        resized = cv2.resize(frame, (new_w, new_h))
+        img = Image.fromarray(resized)
+        photo = ImageTk.PhotoImage(img)
+        
+        canvas.delete("all")
+        canvas.create_image(cw//2, ch//2, image=photo)
+        canvas._photo = photo  # Keep reference
 
 
 if __name__ == '__main__':
-    main()
+    print("Starting Robot Control...")
+    RobotApp()
