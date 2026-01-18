@@ -47,7 +47,7 @@
   <option key="Disable emulate shared pixmaps" value="false" />
   <option key="Use render" value="true" />
   <option key="Try to wake up server when it is powered off" value="false" />
-  <option key="Last connection time" value="1768763334" />
+  <option key="Last connection time" value="1768766809" />
   <option key="Link quality" value="5" />
   <option key="Platform of the last connection" value="Ubuntu 22.04.5 LTS" />
   <option key="Node primary display resolution" value="1024x768" />
@@ -70,7 +70,7 @@
   <option key="Server port" value="22" />
   <option key="Server product" value="NoMachine" />
   <option key="Server product version" value="9.3.7" />
-  <option key="Server hardware specifications" value="ARM64:8187080704" />
+  <option key="Server hardware specifications" value="ARM64:8187084800" />
   <option key="Session" value="" />
   <option key="Show connection request greeting message panel" value="true" />
   <option key="Show expiring license warning message" value="true" />
@@ -85,7 +85,7 @@
   <option key="Enable VPN kill switch" value="false" />
   <option key="NoMachine web server port" value="4443" />
   <option key="Web session information token" value="" />
-  <option key="Session window geometry" value="587, 307, 895, 520" />
+  <option key="Session window geometry" value="534, 5, 895, 520" />
   <option key="Session window state" value="maximized" />
   <option key="xdm mode" value="" />
   <option key="xdm broadcast port" value="177" />
