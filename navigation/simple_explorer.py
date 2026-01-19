@@ -18,15 +18,15 @@ from std_msgs.msg import Bool
 import numpy as np
 import time
 
-# Reduced distances for narrow corridor navigation
-FRONT_SAFE = 0.45       # 45cm before obstacle (was 60cm)
-SIDE_SAFE = 0.35        # 35cm from sides (was 50cm)
-EMERGENCY_DIST = 0.25   # 25cm = STOP AND REVERSE (was 30cm)
-CORRIDOR_WIDTH = 0.60   # Corridor detected if both sides < 60cm
+# Safer distances - prevents wall crashes while allowing corridor navigation
+FRONT_SAFE = 0.50       # 50cm before obstacle (balance between safe and workable)
+SIDE_SAFE = 0.40        # 40cm from sides
+EMERGENCY_DIST = 0.30   # 30cm = STOP AND REVERSE
+CORRIDOR_WIDTH = 0.65   # Corridor detected if both sides < 65cm
 
-SPEED = 0.08            # Forward speed
-TURN_SPEED = 0.35       # Turn speed
-CORRIDOR_SPEED = 0.06   # Slower in corridors
+SPEED = 0.06            # Slower forward speed for safety
+TURN_SPEED = 0.30       # Turn speed
+CORRIDOR_SPEED = 0.05   # Very slow in corridors
 
 # State machine
 STATE_FORWARD = 0

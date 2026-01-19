@@ -47,8 +47,8 @@ estop_topic = None
 explore_topic = None
 
 def setup_publishers():
-    """Setup ROS publishers after connection is established."""
-    global manual_topic, estop_topic, explore_topic
+    """Setup ROS publishers and additional subscribers after connection."""
+    global manual_topic, estop_topic, explore_topic, odom_listener, scan_listener
     if client.is_connected:
         manual_topic = roslibpy.Topic(client, '/manual_cmd', 'geometry_msgs/Twist')
         manual_topic.advertise()
@@ -58,7 +58,18 @@ def setup_publishers():
         
         explore_topic = roslibpy.Topic(client, '/explore_enable', 'std_msgs/Bool')
         explore_topic.advertise()
-        print("✅ ROS Publishers ready")
+        
+        # Subscribe to odom and scan for RViz-style map
+        odom_listener = roslibpy.Topic(client, '/odom', 'nav_msgs/Odometry')
+        odom_listener.subscribe(pose_callback)
+        
+        scan_listener = roslibpy.Topic(client, '/scan', 'sensor_msgs/LaserScan')
+        scan_listener.subscribe(scan_callback)
+        
+        # Start render timer
+        start_map_render_timer()
+        
+        print("✅ ROS Publishers and subscribers ready")
 
 def send_twist(linear: float, angular: float):
     """Send velocity command to robot."""
@@ -245,26 +256,31 @@ def render_rviz_map():
         pass
 
 # Subscribe to map, odometry, and laser scan (RViz-style)
+# Note: These will be re-subscribed after connection in setup_publishers()
 map_listener = roslibpy.Topic(client, '/map', 'nav_msgs/OccupancyGrid')
 map_listener.subscribe(map_callback)
 
-odom_listener = roslibpy.Topic(client, '/odom', 'nav_msgs/Odometry')
-odom_listener.subscribe(pose_callback)
+odom_listener = None
+scan_listener = None
 
-scan_listener = roslibpy.Topic(client, '/scan', 'sensor_msgs/LaserScan')
-scan_listener.subscribe(scan_callback)
+# Timer to render combined RViz-style map
+_render_timer_started = False
 
-# Timer to render map (combines all data sources)
 def start_map_render_timer():
-    import threading
+    """Start background thread to render map with robot and laser overlay."""
+    global _render_timer_started
+    if _render_timer_started:
+        return
+    _render_timer_started = True
+    
     def render_loop():
         while True:
             render_rviz_map()
-            time.sleep(0.1)  # 10 FPS map updates
+            time.sleep(0.1)  # 10 FPS
+    
     t = threading.Thread(target=render_loop, daemon=True)
     t.start()
-
-start_map_render_timer()
+    print("🗺️ Map render timer started")
 
 def gas_callback(message):
     if gas_knob:
