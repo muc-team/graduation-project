@@ -7,12 +7,14 @@ import threading
 import numpy as np
 from nicegui import ui, app
 from ultralytics import YOLO
-RASPBERRY_IP = '192.168.1.200'
+
+RASPBERRY_IP = 'robot.local'
 ROS_PORT, TCP_PORT = 9090, 5555
 
 model = YOLO("../models/yolov8n.pt") 
 client = roslibpy.Ros(host=RASPBERRY_IP, port=ROS_PORT)
 
+# UI Elements
 status_label = None
 video_image = None
 map_image = None
@@ -22,6 +24,8 @@ battery_knob = None
 confidence_knob = None
 log_container = None
 connection_notified = False
+speed_label = None
+action_label = None
 
 latest_frame_b64 = None 
 latest_map_b64 = None 
@@ -29,7 +33,107 @@ latest_map_b64 = None
 frame_counter = 0        
 ui_frame_counter = 0     
 map_counter = 0          
-ui_map_counter = 0       
+ui_map_counter = 0
+
+# Manual Control State
+current_speed = 0.15
+held_key = None
+emergency_stopped = False
+autonomous_mode = False
+
+# ROS Publishers (initialize after connection)
+manual_topic = None
+estop_topic = None
+explore_topic = None
+
+def setup_publishers():
+    """Setup ROS publishers after connection is established."""
+    global manual_topic, estop_topic, explore_topic
+    if client.is_connected:
+        manual_topic = roslibpy.Topic(client, '/manual_cmd', 'geometry_msgs/Twist')
+        manual_topic.advertise()
+        
+        estop_topic = roslibpy.Topic(client, '/emergency_stop', 'std_msgs/Bool')
+        estop_topic.advertise()
+        
+        explore_topic = roslibpy.Topic(client, '/explore_enable', 'std_msgs/Bool')
+        explore_topic.advertise()
+        print("✅ ROS Publishers ready")
+
+def send_twist(linear: float, angular: float):
+    """Send velocity command to robot."""
+    global manual_topic
+    if manual_topic and client.is_connected and not emergency_stopped:
+        manual_topic.publish(roslibpy.Message({
+            'linear': {'x': linear, 'y': 0.0, 'z': 0.0},
+            'angular': {'x': 0.0, 'y': 0.0, 'z': angular}
+        }))
+
+def move_forward():
+    global held_key
+    held_key = 'F'
+    send_twist(current_speed, 0)
+    update_action("Moving Forward")
+
+def move_backward():
+    global held_key
+    held_key = 'B'
+    send_twist(-current_speed, 0)
+    update_action("Moving Backward")
+
+def turn_left():
+    global held_key
+    held_key = 'L'
+    send_twist(0, 0.5)
+    update_action("Turning Left")
+
+def turn_right():
+    global held_key
+    held_key = 'R'
+    send_twist(0, -0.5)
+    update_action("Turning Right")
+
+def stop_robot():
+    global held_key
+    held_key = None
+    send_twist(0, 0)
+    update_action("Stopped")
+
+def emergency_stop():
+    global emergency_stopped, held_key
+    emergency_stopped = True
+    held_key = None
+    send_twist(0, 0)
+    if estop_topic and client.is_connected:
+        estop_topic.publish(roslibpy.Message({'data': True}))
+    update_action("🛑 EMERGENCY STOP")
+    ui.notify('EMERGENCY STOP ACTIVATED!', type='negative')
+
+def release_emergency():
+    global emergency_stopped
+    emergency_stopped = False
+    if estop_topic and client.is_connected:
+        estop_topic.publish(roslibpy.Message({'data': False}))
+    update_action("Ready")
+    ui.notify('Emergency released', type='positive')
+
+def toggle_autonomous(enabled: bool):
+    global autonomous_mode
+    autonomous_mode = enabled
+    if explore_topic and client.is_connected:
+        explore_topic.publish(roslibpy.Message({'data': enabled}))
+    update_action("AUTONOMOUS" if enabled else "Manual")
+    ui.notify(f"Autonomous mode {'enabled' if enabled else 'disabled'}", type='info')
+
+def update_speed(value: float):
+    global current_speed
+    current_speed = value
+    if speed_label:
+        speed_label.text = f'{value:.2f} m/s'
+
+def update_action(text: str):
+    if action_label:
+        action_label.text = text       
 
 def map_callback(msg):
     global latest_map_b64, map_counter
@@ -89,12 +193,17 @@ battery_listener = roslibpy.Topic(client, '/battery_state', 'sensor_msgs/Battery
 battery_listener.subscribe(battery_callback)
 
 def connect_to_ros_thread():
+    publishers_setup = False
     while True:
         try:
             if not client.is_connected:
                 client.run()
+            elif not publishers_setup:
+                setup_publishers()
+                publishers_setup = True
             time.sleep(2)
         except:
+            publishers_setup = False
             time.sleep(2)
 
 def update_connection_status():
@@ -154,9 +263,30 @@ def update_ui_content():
         map_image.set_source(latest_map_b64)
         ui_map_counter = map_counter
 
+def handle_keyboard(e):
+    """Handle keyboard events for robot control."""
+    key = e.key.lower() if hasattr(e.key, 'lower') else str(e.key).lower()
+    
+    if e.action.keydown:
+        if key in ['w', 'arrowup']:
+            move_forward()
+        elif key in ['s', 'arrowdown']:
+            move_backward()
+        elif key in ['a', 'arrowleft']:
+            turn_left()
+        elif key in ['d', 'arrowright']:
+            turn_right()
+        elif key == ' ':
+            stop_robot()
+        elif key == 'escape':
+            emergency_stop()
+    elif e.action.keyup:
+        if key in ['w', 's', 'a', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright']:
+            stop_robot()
+
 @ui.page('/')
 def main_page():
-    global status_label, battery_chart, video_image, map_image, gas_knob, battery_knob, confidence_knob, log_container
+    global status_label, battery_chart, video_image, map_image, gas_knob, battery_knob, confidence_knob, log_container, speed_label, action_label
     
     ui.add_head_html('''
         <style>
@@ -172,6 +302,9 @@ def main_page():
             }
         </style>
     ''')
+    
+    # Keyboard bindings
+    ui.keyboard(on_key=handle_keyboard)
 
     ui.dark_mode().enable()
 
@@ -242,17 +375,53 @@ def main_page():
 
         with ui.column().classes('w-1/4 h-full gap-4'):
             
-            with ui.card().classes('glass-card w-full h-1/2 p-0 relative bg-gray-900 border-2 border-green-900'):
+            with ui.card().classes('glass-card w-full h-1/3 p-0 relative bg-gray-900 border-2 border-green-900'):
                 ui.label('SLAM MAP').classes('absolute top-3 left-3 z-10 text-black bg-white px-2 py-0.5 text-xs rounded font-bold shadow-lg')
                 map_image = ui.interactive_image().classes('w-full h-full object-contain')
 
-            with ui.column().classes('w-full flex-grow gap-3'):
-                def btn_style(color): return f'w-full h-12 text-white font-bold rounded-xl shadow-lg bg-gradient-to-r from-{color}-600 to-{color}-800 hover:scale-105 transition'
+            # Manual Control Panel
+            with ui.card().classes('glass-card w-full p-4'):
+                ui.label('MANUAL CONTROL').classes('text-gray-400 text-xs font-bold tracking-widest mb-2')
                 
-                ui.button('START MISSION', icon='play_arrow').classes(btn_style('cyan'))
-                ui.button('MANUAL CONTROL', icon='gamepad').classes(btn_style('blue'))
-                ui.button('SEND TO POINT', icon='gps_fixed').classes(btn_style('indigo'))
-                ui.button('EMERGENCY STOP', icon='warning').classes('w-full h-14 text-white font-bold rounded-xl shadow-lg bg-red-600 border-2 border-red-400 hover:bg-red-700 transition')
+                # Action Status
+                with ui.row().classes('w-full justify-center mb-2'):
+                    action_label = ui.label('Ready').classes('text-green-400 font-bold text-lg')
+                
+                # D-Pad Controls
+                with ui.column().classes('w-full items-center gap-1'):
+                    ui.button('▲', on_click=move_forward).classes('w-14 h-12 text-xl bg-blue-600 hover:bg-blue-500 rounded-lg')
+                    with ui.row().classes('gap-1'):
+                        ui.button('◀', on_click=turn_left).classes('w-14 h-12 text-xl bg-blue-600 hover:bg-blue-500 rounded-lg')
+                        ui.button('■', on_click=stop_robot).classes('w-14 h-12 text-xl bg-gray-600 hover:bg-gray-500 rounded-lg')
+                        ui.button('▶', on_click=turn_right).classes('w-14 h-12 text-xl bg-blue-600 hover:bg-blue-500 rounded-lg')
+                    ui.button('▼', on_click=move_backward).classes('w-14 h-12 text-xl bg-blue-600 hover:bg-blue-500 rounded-lg')
+                
+                # Speed Control
+                ui.label('SPEED').classes('text-gray-500 text-xs mt-3')
+                ui.slider(min=0.1, max=0.3, step=0.01, value=0.15, on_change=lambda e: update_speed(e.value)).classes('w-full')
+                speed_label = ui.label('0.15 m/s').classes('text-cyan-400 text-sm text-center w-full')
+                
+                # Autonomous Toggle
+                with ui.row().classes('w-full items-center justify-between mt-2'):
+                    ui.label('Autonomous').classes('text-gray-400')
+                    ui.switch(on_change=lambda e: toggle_autonomous(e.value)).classes('text-cyan-400')
+            
+            # Emergency Controls
+            with ui.card().classes('glass-card w-full p-3'):
+                ui.label('EMERGENCY').classes('text-gray-400 text-xs font-bold tracking-widest mb-2')
+                with ui.row().classes('w-full gap-2'):
+                    ui.button('🛑 STOP', on_click=emergency_stop).classes('flex-grow h-12 bg-red-600 hover:bg-red-500 text-white font-bold rounded-lg')
+                    ui.button('✓', on_click=release_emergency).classes('w-12 h-12 bg-green-600 hover:bg-green-500 text-white font-bold rounded-lg')
+            
+            # Keyboard Hints
+            with ui.card().classes('glass-card w-full p-3 flex-grow'):
+                ui.label('KEYBOARD').classes('text-gray-400 text-xs font-bold tracking-widest mb-2')
+                ui.label('W/↑ Forward').classes('text-gray-500 text-xs')
+                ui.label('S/↓ Backward').classes('text-gray-500 text-xs')
+                ui.label('A/← Turn Left').classes('text-gray-500 text-xs')
+                ui.label('D/→ Turn Right').classes('text-gray-500 text-xs')
+                ui.label('Space: Stop').classes('text-gray-500 text-xs')
+                ui.label('Esc: Emergency').classes('text-gray-500 text-xs')
 
     ui.timer(1.0, update_connection_status)
     ui.timer(0.05, update_ui_content)
