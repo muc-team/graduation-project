@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-ULTRA SAFE Explorer - NEVER BUMPS
+SMART Corridor Explorer - Map-Aware Navigation
 Robot: 46cm x 32cm
-LiDAR at center (16cm from front, 16cm from sides)
 
-SAFETY DISTANCES:
-- Front: 60cm (very conservative)
-- Sides: 50cm
-- If anything closer than 30cm: REVERSE IMMEDIATELY
+Features:
+- Corridor detection with wall-following
+- Turn persistence to prevent oscillation
+- State machine for consistent behavior
+- Reduced distances for narrow spaces
 """
 
 import rclpy
@@ -16,33 +16,60 @@ from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool
 import numpy as np
+import time
 
-# ULTRA SAFE distances
-FRONT_SAFE = 0.60      # 60cm before any obstacle
-SIDE_SAFE = 0.50       # 50cm from sides
-EMERGENCY_DIST = 0.30  # 30cm = STOP AND REVERSE
-SPEED = 0.08           # Very slow
-TURN_SPEED = 0.3
+# Reduced distances for narrow corridor navigation
+FRONT_SAFE = 0.45       # 45cm before obstacle (was 60cm)
+SIDE_SAFE = 0.35        # 35cm from sides (was 50cm)
+EMERGENCY_DIST = 0.25   # 25cm = STOP AND REVERSE (was 30cm)
+CORRIDOR_WIDTH = 0.60   # Corridor detected if both sides < 60cm
+
+SPEED = 0.08            # Forward speed
+TURN_SPEED = 0.35       # Turn speed
+CORRIDOR_SPEED = 0.06   # Slower in corridors
+
+# State machine
+STATE_FORWARD = 0
+STATE_CORRIDOR = 1
+STATE_TURNING = 2
+STATE_REVERSING = 3
 
 
-class UltraSafeExplorer(Node):
+class SmartExplorer(Node):
     def __init__(self):
-        super().__init__('ultra_safe_explorer')
+        super().__init__('smart_explorer')
         
         self.enabled = False
+        self.state = STATE_FORWARD
+        
+        # LiDAR readings
         self.front = 10.0
         self.left = 10.0
         self.right = 10.0
         self.front_left = 10.0
         self.front_right = 10.0
         
+        # Turn persistence - prevents oscillation
+        self.turn_direction = 0  # -1 = right, 0 = none, 1 = left
+        self.turn_start_time = 0
+        self.turn_lock_duration = 1.2  # Lock turn for 1.2 seconds
+        
+        # History for smarter decisions
+        self.left_history = []
+        self.right_history = []
+        self.history_size = 5
+        
+        # Stuck detection
+        self.last_positions = []
+        self.stuck_counter = 0
+        
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.create_subscription(LaserScan, '/scan', self.scan_cb, 10)
         self.create_subscription(Bool, '/explore_enable', self.enable_cb, 10)
-        self.create_timer(0.2, self.navigate)
+        self.create_timer(0.15, self.navigate)  # Slightly faster updates
         
-        self.log('Ultra Safe Explorer Started')
-        self.log(f'SAFETY: Front={FRONT_SAFE}m Side={SIDE_SAFE}m Emergency={EMERGENCY_DIST}m')
+        self.log('🚀 Smart Corridor Explorer Started')
+        self.log(f'Distances: Front={FRONT_SAFE}m Side={SIDE_SAFE}m Emergency={EMERGENCY_DIST}m')
     
     def log(self, msg):
         self.get_logger().info(msg)
@@ -52,6 +79,8 @@ class UltraSafeExplorer(Node):
         self.log(f'Explorer {"ENABLED" if self.enabled else "DISABLED"}')
         if not self.enabled:
             self.stop()
+            self.state = STATE_FORWARD
+            self.turn_direction = 0
     
     def scan_cb(self, msg):
         """Read LiDAR - all directions"""
@@ -70,20 +99,27 @@ class UltraSafeExplorer(Node):
                 section = np.concatenate([r[s:], r[:e]])
             return float(np.min(section)) if len(section) > 0 else 12.0
         
-        # FRONT: -40 to +40 degrees (wide cone)
-        self.front = min(min_range(320, 360), min_range(0, 40))
+        # FRONT: -35 to +35 degrees (slightly narrower cone)
+        self.front = min(min_range(325, 360), min_range(0, 35))
         
-        # FRONT-LEFT: +25 to +55
-        self.front_left = min_range(25, 55)
+        # FRONT-LEFT: +20 to +50
+        self.front_left = min_range(20, 50)
         
-        # FRONT-RIGHT: -55 to -25 (305 to 335)
-        self.front_right = min_range(305, 335)
+        # FRONT-RIGHT: -50 to -20 (310 to 340)
+        self.front_right = min_range(310, 340)
         
-        # LEFT: +55 to +110
-        self.left = min_range(55, 110)
+        # LEFT: +50 to +100
+        self.left = min_range(50, 100)
         
-        # RIGHT: -110 to -55 (250 to 305)
-        self.right = min_range(250, 305)
+        # RIGHT: -100 to -50 (260 to 310)
+        self.right = min_range(260, 310)
+        
+        # Update history for smarter decisions
+        self.left_history.append(self.left)
+        self.right_history.append(self.right)
+        if len(self.left_history) > self.history_size:
+            self.left_history.pop(0)
+            self.right_history.pop(0)
     
     def stop(self):
         msg = Twist()
@@ -95,58 +131,128 @@ class UltraSafeExplorer(Node):
         msg.angular.z = float(angular)
         self.cmd_pub.publish(msg)
     
+    def is_turn_locked(self):
+        """Check if we're locked into a turn direction"""
+        if self.turn_direction == 0:
+            return False
+        return (time.time() - self.turn_start_time) < self.turn_lock_duration
+    
+    def set_turn(self, direction):
+        """Set turn direction with lock (-1=right, 1=left)"""
+        if not self.is_turn_locked():
+            self.turn_direction = direction
+            self.turn_start_time = time.time()
+    
+    def get_avg_space(self, history):
+        """Get average space from history"""
+        if not history:
+            return 10.0
+        return sum(history) / len(history)
+    
+    def is_in_corridor(self):
+        """Detect if robot is in a narrow corridor"""
+        return self.left < CORRIDOR_WIDTH and self.right < CORRIDOR_WIDTH
+    
     def navigate(self):
         if not self.enabled:
             return
         
-        # Log every 5 seconds
+        # Debug logging every 3 seconds
         if not hasattr(self, '_cnt'):
             self._cnt = 0
         self._cnt += 1
-        if self._cnt % 25 == 0:
-            self.log(f'F:{self.front:.2f} FL:{self.front_left:.2f} FR:{self.front_right:.2f} L:{self.left:.2f} R:{self.right:.2f}')
+        if self._cnt % 20 == 0:
+            state_name = ['FORWARD', 'CORRIDOR', 'TURNING', 'REVERSING'][self.state]
+            self.log(f'[{state_name}] F:{self.front:.2f} L:{self.left:.2f} R:{self.right:.2f} Turn:{self.turn_direction}')
         
-        # EMERGENCY: Something very close!
+        # ============ EMERGENCY HANDLING ============
         if self.front < EMERGENCY_DIST:
-            self.log(f'🚨 EMERGENCY REVERSE! Front={self.front:.2f}m')
+            self.state = STATE_REVERSING
+            self.log(f'🚨 EMERGENCY! Front={self.front:.2f}m - Reversing')
             self.move(-SPEED, 0)
             return
         
         if self.front_left < EMERGENCY_DIST or self.left < EMERGENCY_DIST * 0.8:
-            self.log(f'🚨 Too close on LEFT! Turning right...')
-            self.move(0, -TURN_SPEED)
+            self.log(f'🚨 Left emergency! Veering right')
+            self.set_turn(-1)
+            self.move(0, -TURN_SPEED * 0.8)
             return
         
         if self.front_right < EMERGENCY_DIST or self.right < EMERGENCY_DIST * 0.8:
-            self.log(f'🚨 Too close on RIGHT! Turning left...')
-            self.move(0, TURN_SPEED)
+            self.log(f'🚨 Right emergency! Veering left')
+            self.set_turn(1)
+            self.move(0, TURN_SPEED * 0.8)
             return
         
-        # BLOCKED FRONT: Turn to clearer side
-        if self.front < FRONT_SAFE:
-            if self.right > self.left:
-                self.move(0, -TURN_SPEED)
+        # ============ CORRIDOR MODE ============
+        if self.is_in_corridor():
+            self.state = STATE_CORRIDOR
+            
+            # In corridor: center between walls
+            diff = self.left - self.right
+            correction = np.clip(diff * 0.3, -0.2, 0.2)
+            
+            if self.front < FRONT_SAFE:
+                # Blocked in corridor - must turn
+                if self.is_turn_locked():
+                    self.move(0, self.turn_direction * TURN_SPEED)
+                else:
+                    # Choose based on history, not instant reading
+                    avg_left = self.get_avg_space(self.left_history)
+                    avg_right = self.get_avg_space(self.right_history)
+                    
+                    if avg_right > avg_left + 0.05:  # Need 5cm difference to switch
+                        self.set_turn(-1)
+                    else:
+                        self.set_turn(1)
+                    self.move(0, self.turn_direction * TURN_SPEED)
             else:
-                self.move(0, TURN_SPEED)
+                # Corridor clear ahead - move with centering
+                self.move(CORRIDOR_SPEED, correction)
             return
         
-        # BLOCKED FRONT-LEFT
+        # ============ NORMAL NAVIGATION ============
+        self.state = STATE_FORWARD
+        
+        # Front blocked - need to turn
+        if self.front < FRONT_SAFE:
+            self.state = STATE_TURNING
+            
+            if self.is_turn_locked():
+                # Continue previous turn direction
+                self.move(0, self.turn_direction * TURN_SPEED)
+            else:
+                # Choose new direction based on average space
+                avg_left = self.get_avg_space(self.left_history)
+                avg_right = self.get_avg_space(self.right_history)
+                
+                if avg_right > avg_left + 0.10:  # 10cm hysteresis
+                    self.set_turn(-1)
+                    self.log(f'↻ Turning RIGHT (L:{avg_left:.2f} R:{avg_right:.2f})')
+                else:
+                    self.set_turn(1)
+                    self.log(f'↺ Turning LEFT (L:{avg_left:.2f} R:{avg_right:.2f})')
+                
+                self.move(0, self.turn_direction * TURN_SPEED)
+            return
+        
+        # Gentle corrections near walls
         if self.front_left < SIDE_SAFE:
-            self.move(SPEED * 0.5, -0.15)  # Slow forward, veer right
+            self.move(SPEED * 0.7, -0.12)
             return
         
-        # BLOCKED FRONT-RIGHT
         if self.front_right < SIDE_SAFE:
-            self.move(SPEED * 0.5, 0.15)  # Slow forward, veer left
+            self.move(SPEED * 0.7, 0.12)
             return
         
-        # ALL CLEAR - go forward
+        # All clear - full speed ahead, release turn lock
+        self.turn_direction = 0
         self.move(SPEED, 0)
 
 
 def main():
     rclpy.init()
-    node = UltraSafeExplorer()
+    node = SmartExplorer()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

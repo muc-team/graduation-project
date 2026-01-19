@@ -135,33 +135,136 @@ def update_action(text: str):
     if action_label:
         action_label.text = text       
 
+# Map data storage for RViz-style rendering
+map_info = {'width': 0, 'height': 0, 'resolution': 0.05, 'origin_x': 0, 'origin_y': 0, 'data': None}
+robot_pose = {'x': 0, 'y': 0, 'theta': 0}
+laser_points = []
+
 def map_callback(msg):
-    global latest_map_b64, map_counter
+    """Store map data for rendering."""
+    global map_info
     try:
-        width = msg['info']['width']
-        height = msg['info']['height']
-        raw_data = msg['data']
+        map_info['width'] = msg['info']['width']
+        map_info['height'] = msg['info']['height']
+        map_info['resolution'] = msg['info']['resolution']
+        map_info['origin_x'] = msg['info']['origin']['position']['x']
+        map_info['origin_y'] = msg['info']['origin']['position']['y']
+        map_info['data'] = np.array(msg['data'], dtype=np.int8)
+    except Exception as e:
+        pass
+
+def pose_callback(msg):
+    """Get robot pose from odometry."""
+    global robot_pose
+    try:
+        robot_pose['x'] = msg['pose']['pose']['position']['x']
+        robot_pose['y'] = msg['pose']['pose']['position']['y']
+        # Extract yaw from quaternion
+        q = msg['pose']['pose']['orientation']
+        siny = 2.0 * (q['w'] * q['z'] + q['x'] * q['y'])
+        cosy = 1.0 - 2.0 * (q['y'] * q['y'] + q['z'] * q['z'])
+        robot_pose['theta'] = np.arctan2(siny, cosy)
+    except Exception as e:
+        pass
+
+def scan_callback(msg):
+    """Get laser scan points for overlay."""
+    global laser_points
+    try:
+        ranges = msg['ranges']
+        angle_min = msg['angle_min']
+        angle_increment = msg['angle_increment']
         
-        data = np.array(raw_data, dtype=np.int8).reshape((height, width))
+        points = []
+        for i, r in enumerate(ranges):
+            if r > 0.05 and r < 12.0 and np.isfinite(r):
+                angle = angle_min + i * angle_increment + robot_pose['theta']
+                px = robot_pose['x'] + r * np.cos(angle)
+                py = robot_pose['y'] + r * np.sin(angle)
+                points.append((px, py))
+        laser_points = points
+    except Exception as e:
+        pass
+
+def render_rviz_map():
+    """Render map exactly like RViz with robot and laser scan."""
+    global latest_map_b64, map_counter
+    
+    if map_info['data'] is None or map_info['width'] == 0:
+        return
+    
+    try:
+        w = map_info['width']
+        h = map_info['height']
+        res = map_info['resolution']
+        origin_x = map_info['origin_x']
+        origin_y = map_info['origin_y']
         
-        img = np.full((height, width, 3), 20, dtype=np.uint8) 
-        img[data == 0] = [255, 255, 255]
-        img[data == 100] = [255, 50, 50]
+        data = map_info['data'].reshape((h, w))
         
-        img = np.flipud(img) 
+        # RViz exact colors (BGR for OpenCV)
+        img = np.full((h, w, 3), 205, dtype=np.uint8)  # Unknown = gray #CDCDCD
+        img[data == 0] = [254, 254, 254]    # Free = almost white
+        img[data == 100] = [0, 0, 0]        # Occupied = black
         
+        # Scale up for better visibility
+        scale = max(2, min(4, 600 // max(w, h)))
+        img = cv2.resize(img, (w * scale, h * scale), interpolation=cv2.INTER_NEAREST)
+        
+        # Convert robot position to pixel coordinates
+        rx = int((robot_pose['x'] - origin_x) / res * scale)
+        ry = int((h - (robot_pose['y'] - origin_y) / res) * scale)  # Flip Y
+        
+        # Draw laser scan points (red dots like RViz)
+        for px, py in laser_points:
+            lx = int((px - origin_x) / res * scale)
+            ly = int((h - (py - origin_y) / res) * scale)
+            if 0 <= lx < w * scale and 0 <= ly < h * scale:
+                cv2.circle(img, (lx, ly), max(1, scale // 2), (0, 0, 255), -1)
+        
+        # Draw robot (green rectangle with direction arrow - like RViz)
+        robot_size = int(0.23 / res * scale)  # 23cm robot radius
+        if 0 <= rx < w * scale and 0 <= ry < h * scale:
+            # Robot body (filled green circle like RViz default)
+            cv2.circle(img, (rx, ry), robot_size, (0, 180, 0), -1)
+            cv2.circle(img, (rx, ry), robot_size, (0, 255, 0), 2)
+            
+            # Direction arrow
+            arrow_len = robot_size + int(10 * scale / 3)
+            ax = int(rx + arrow_len * np.cos(-robot_pose['theta']))
+            ay = int(ry + arrow_len * np.sin(-robot_pose['theta']))
+            cv2.arrowedLine(img, (rx, ry), (ax, ay), (0, 255, 255), max(2, scale), tipLength=0.4)
+        
+        # Encode to base64
         _, buffer = cv2.imencode('.png', img)
         b64_str = base64.b64encode(buffer).decode('utf-8')
-        
         latest_map_b64 = f'data:image/png;base64,{b64_str}'
-        
         map_counter += 1
         
     except Exception as e:
         pass
 
+# Subscribe to map, odometry, and laser scan (RViz-style)
 map_listener = roslibpy.Topic(client, '/map', 'nav_msgs/OccupancyGrid')
 map_listener.subscribe(map_callback)
+
+odom_listener = roslibpy.Topic(client, '/odom', 'nav_msgs/Odometry')
+odom_listener.subscribe(pose_callback)
+
+scan_listener = roslibpy.Topic(client, '/scan', 'sensor_msgs/LaserScan')
+scan_listener.subscribe(scan_callback)
+
+# Timer to render map (combines all data sources)
+def start_map_render_timer():
+    import threading
+    def render_loop():
+        while True:
+            render_rviz_map()
+            time.sleep(0.1)  # 10 FPS map updates
+    t = threading.Thread(target=render_loop, daemon=True)
+    t.start()
+
+start_map_render_timer()
 
 def gas_callback(message):
     if gas_knob:
