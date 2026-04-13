@@ -12,8 +12,8 @@ from ultralytics import YOLO
 
 AVAILABLE_ROBOTS = ['robot.local', 'robot2.local']
 ROBOT_PROFILES = {
-    'robot.local':  {'name': 'Alpha', 'icon': 'smart_toy',              'color': 'text-blue-400'},
-    'robot2.local': {'name': 'Beta',      'icon': 'precision_manufacturing', 'color': 'text-orange-400'},
+    'robot.local':  {'name': 'Alpha', 'icon': 'smart_toy', 'color': 'text-blue-400'},
+    'robot2.local': {'name': 'Beta', 'icon': 'precision_manufacturing', 'color': 'text-orange-400'},
 }
 RASPBERRY_IP = AVAILABLE_ROBOTS[0]
 ROS_PORT, TCP_PORT = 9090, 5555
