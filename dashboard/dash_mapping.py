@@ -10,8 +10,14 @@ import numpy as np
 from nicegui import ui, app
 from ultralytics import YOLO
 
-RASPBERRY_IP = 'robot.local'
+AVAILABLE_ROBOTS = ['robot.local', 'robot2.local']
+ROBOT_PROFILES = {
+    'robot.local':  {'name': 'Alpha', 'icon': 'smart_toy',              'color': 'text-blue-400'},
+    'robot2.local': {'name': 'Beta',      'icon': 'precision_manufacturing', 'color': 'text-orange-400'},
+}
+RASPBERRY_IP = AVAILABLE_ROBOTS[0]
 ROS_PORT, TCP_PORT = 9090, 5555
+_zmq_reconnect_flag = threading.Event()  # signals the video thread to reconnect
 
 # --- Model Management ---
 MODELS_DIR = os.path.join(os.path.dirname(__file__), '..', 'models')
@@ -22,7 +28,7 @@ def get_available_models():
     return sorted([os.path.basename(p) for p in glob.glob(pattern)])
 
 available_models = get_available_models()
-current_model_name = 'yolov8n.pt' if 'yolov8n.pt' in available_models else (available_models[0] if available_models else 'yolov8n.pt')
+current_model_name = 'yolov8n-fire.pt' if 'yolov8n-fire.pt' in available_models else (available_models[0] if available_models else 'yolov8n-fire.pt')
 model = YOLO(os.path.join(MODELS_DIR, current_model_name))
 model_lock = threading.Lock()  # protects model reloads
 client = roslibpy.Ros(host=RASPBERRY_IP, port=ROS_PORT)
@@ -41,6 +47,10 @@ speed_label = None
 model_select = None
 model_label = None
 action_label = None
+robot_select = None
+robot_ip_label = None
+robot_name_label = None
+robot_icon = None
 
 latest_frame_b64 = None 
 latest_map_b64 = None 
@@ -59,6 +69,7 @@ autonomous_mode = False
 # ROS Publishers (initialize after connection)
 manual_topic = None
 estop_topic = None
+_publishers_setup = False
 explore_topic = None
 
 def setup_publishers():
@@ -181,6 +192,79 @@ def swap_model(new_model_name: str):
         ui.notify(f'Model switched to {new_model_name}', type='positive')
     except Exception as e:
         ui.notify(f'Failed to load model: {e}', type='negative')
+
+def swap_robot(new_ip: str):
+    """Switch to a different robot by reconnecting ROS and ZMQ."""
+    global RASPBERRY_IP, client, connection_notified, _publishers_setup
+    global manual_topic, estop_topic, explore_topic
+    global map_listener, gas_listener, listener, battery_listener
+    global odom_listener, scan_listener
+    global latest_frame_b64, latest_map_b64
+
+    if new_ip == RASPBERRY_IP:
+        return
+
+    ui.notify(f'Switching to {new_ip}…', type='info')
+
+    # --- Tear down old connection ---
+    try:
+        client.close()
+    except Exception:
+        pass
+
+    # Reset state
+    manual_topic = None
+    estop_topic = None
+    explore_topic = None
+    odom_listener = None
+    scan_listener = None
+    connection_notified = False
+    _publishers_setup = False
+    latest_frame_b64 = None
+    latest_map_b64 = None
+
+    # Update IP
+    RASPBERRY_IP = new_ip
+
+    # --- Create new ROS client & re-subscribe module-level topics ---
+    client = roslibpy.Ros(host=RASPBERRY_IP, port=ROS_PORT)
+
+    map_listener = roslibpy.Topic(client, '/map', 'nav_msgs/OccupancyGrid')
+    map_listener.subscribe(map_callback)
+
+    gas_listener = roslibpy.Topic(client, '/gas_sensor', 'std_msgs/Float32')
+    gas_listener.subscribe(gas_callback)
+
+    listener = roslibpy.Topic(client, '/robot_log', 'std_msgs/String')
+    listener.subscribe(log_callback)
+
+    battery_listener = roslibpy.Topic(client, '/battery_state', 'sensor_msgs/BatteryState')
+    battery_listener.subscribe(battery_callback)
+
+    # Signal video thread to reconnect ZMQ
+    _zmq_reconnect_flag.set()
+
+    # Update UI labels
+    if robot_ip_label:
+        robot_ip_label.text = f'{RASPBERRY_IP}:{ROS_PORT}'
+    if status_label:
+        status_label.text = 'CONNECTING'
+        status_label.classes(remove='text-green-400 text-red-500', add='text-yellow-500')
+    # Update robot name & icon
+    profile = ROBOT_PROFILES.get(new_ip, {'name': new_ip, 'icon': 'smart_toy', 'color': 'text-blue-400'})
+    if robot_name_label:
+        robot_name_label.text = profile['name']
+    if robot_icon:
+        robot_icon._props['name'] = profile['icon']
+        robot_icon.classes(remove='text-blue-400 text-orange-400', add=profile['color'])
+        robot_icon.update()
+    # Clear stale frames from previous robot
+    if video_image:
+        video_image.set_source('')
+    if map_image:
+        map_image.set_source('')
+
+    ui.notify(f'Now targeting {profile["name"]} ({new_ip})', type='positive')
 
 # Map data storage for RViz-style rendering
 map_info = {'width': 0, 'height': 0, 'resolution': 0.05, 'origin_x': 0, 'origin_y': 0, 'data': None}
@@ -348,17 +432,18 @@ battery_listener = roslibpy.Topic(client, '/battery_state', 'sensor_msgs/Battery
 battery_listener.subscribe(battery_callback)
 
 def connect_to_ros_thread():
-    publishers_setup = False
+    global _publishers_setup
     while True:
         try:
             if not client.is_connected:
+                _publishers_setup = False
                 client.run()
-            elif not publishers_setup:
+            elif not _publishers_setup:
                 setup_publishers()
-                publishers_setup = True
+                _publishers_setup = True
             time.sleep(2)
         except:
-            publishers_setup = False
+            _publishers_setup = False
             time.sleep(2)
 
 def update_connection_status():
@@ -376,38 +461,83 @@ def update_connection_status():
 
 def video_stream_loop():
     global latest_frame_b64, frame_counter
-    
-    context = zmq.Context()
-    socket = context.socket(zmq.SUB)
-    socket.setsockopt(zmq.CONFLATE, 1)
-    socket.setsockopt_string(zmq.SUBSCRIBE, '')
-    
-    connected = False
-    while not connected:
+
+    context = None
+    socket = None
+    current_endpoint = None
+
+    def _cleanup():
+        """Forcefully close socket and context."""
+        nonlocal socket, context, current_endpoint
         try:
-            socket.connect(f"tcp://{RASPBERRY_IP}:{TCP_PORT}")
-            connected = True
+            if socket is not None:
+                if current_endpoint:
+                    try:
+                        socket.disconnect(current_endpoint)
+                    except Exception:
+                        pass
+                socket.setsockopt(zmq.LINGER, 0)
+                socket.close()
         except Exception:
-            time.sleep(1)
+            pass
+        try:
+            if context is not None:
+                context.term()
+        except Exception:
+            pass
+        socket = None
+        context = None
+        current_endpoint = None
+        time.sleep(0.3)  # let OS release the resources
 
     while True:
-        try:
-            data = socket.recv()
-            nparr = np.frombuffer(data, np.uint8)
-            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        # --- Clean up any previous socket ---
+        _cleanup()
+        _zmq_reconnect_flag.clear()
 
-            if frame is not None:
-                with model_lock:
-                    current = model
-                results = current(frame, verbose=False)
-                annotated_frame = results[0].plot()
-                
-                _, buffer = cv2.imencode('.jpg', annotated_frame)
-                b64_string = base64.b64encode(buffer).decode('utf-8')
-                latest_frame_b64 = f'data:image/jpeg;base64,{b64_string}'
-                frame_counter += 1
-        except:
-            continue
+        # --- Create fresh socket ---
+        target_ip = RASPBERRY_IP  # snapshot current target
+        context = zmq.Context()
+        socket = context.socket(zmq.SUB)
+        socket.setsockopt(zmq.CONFLATE, 1)
+        socket.setsockopt_string(zmq.SUBSCRIBE, '')
+        socket.setsockopt(zmq.RCVTIMEO, 1000)  # 1s receive timeout
+        socket.setsockopt(zmq.LINGER, 0)        # don't block on close
+
+        current_endpoint = f"tcp://{target_ip}:{TCP_PORT}"
+        try:
+            socket.connect(current_endpoint)
+        except Exception:
+            time.sleep(1)
+            continue  # retry with fresh socket
+
+        print(f"📷 ZMQ connected to {current_endpoint}")
+
+        # --- Receive loop ---
+        while True:
+            if _zmq_reconnect_flag.is_set():
+                print(f"📷 ZMQ reconnect requested, leaving {current_endpoint}")
+                break
+
+            try:
+                data = socket.recv()
+                nparr = np.frombuffer(data, np.uint8)
+                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+                if frame is not None:
+                    with model_lock:
+                        current = model
+                    results = current(frame, verbose=False)
+                    annotated_frame = results[0].plot()
+
+                    _, buffer = cv2.imencode('.jpg', annotated_frame)
+                    b64_string = base64.b64encode(buffer).decode('utf-8')
+                    latest_frame_b64 = f'data:image/jpeg;base64,{b64_string}'
+                    frame_counter += 1
+            except zmq.Again:
+                continue  # timeout — loop to check reconnect flag
+            except Exception:
+                continue
 
 def update_ui_content():
     global ui_frame_counter, ui_map_counter
@@ -443,7 +573,7 @@ def handle_keyboard(e):
 
 @ui.page('/')
 def main_page():
-    global status_label, battery_chart, video_image, map_image, gas_knob, battery_knob, confidence_knob, log_container, speed_label, action_label, model_select, model_label
+    global status_label, battery_chart, video_image, map_image, gas_knob, battery_knob, confidence_knob, log_container, speed_label, action_label, model_select, model_label, robot_select, robot_ip_label, robot_name_label, robot_icon
     
     ui.add_head_html('''
         <style>
@@ -473,12 +603,21 @@ def main_page():
                 ui.label('ROBOT STATUS').classes('text-gray-400 text-xs font-bold tracking-widest mb-2')
                 with ui.row().classes('items-center justify-between w-full'):
                     with ui.row().classes('items-center gap-3'):
-                        ui.icon('smart_toy', size='32px').classes('text-blue-400')
+                        _profile = ROBOT_PROFILES.get(RASPBERRY_IP, {'name': RASPBERRY_IP, 'icon': 'smart_toy', 'color': 'text-blue-400'})
+                        robot_icon = ui.icon(_profile['icon'], size='32px').classes(_profile['color'])
                         with ui.column().classes('gap-0'):
-                            ui.label('Master Robot').classes('text-white font-bold text-lg leading-none')
-                            ui.label('ID: #8821').classes('text-gray-500 text-xs')
-                            ui.label(f'{RASPBERRY_IP}:{ROS_PORT}').classes('text-cyan-400 text-xs font-mono mt-1')
+                            robot_name_label = ui.label(_profile['name']).classes('text-white font-bold text-lg leading-none')
+                            robot_ip_label = ui.label(f'{RASPBERRY_IP}:{ROS_PORT}').classes('text-cyan-400 text-xs font-mono mt-1')
                     status_label = ui.label('CONNECTING').classes('text-yellow-500 font-bold text-sm')
+                # Robot selector
+                with ui.row().classes('w-full items-center gap-2 mt-2'):
+                    ui.icon('swap_horiz', size='18px').classes('text-cyan-400')
+                    _robot_options = {ip: ROBOT_PROFILES.get(ip, {'name': ip})['name'] for ip in AVAILABLE_ROBOTS}
+                    robot_select = ui.select(
+                        options=_robot_options,
+                        value=RASPBERRY_IP,
+                        on_change=lambda e: swap_robot(e.value),
+                    ).props('dense borderless dark color=cyan-4').classes('text-white flex-grow').style('font-size: 12px;')
             
             with ui.card().classes('glass-card w-full h-1/4'):
                 ui.label('SIGNAL STRENGTH').classes('text-gray-400 text-xs font-bold tracking-widest mb-1')
@@ -510,7 +649,7 @@ def main_page():
                         options=available_models,
                         value=current_model_name,
                         on_change=lambda e: swap_model(e.value),
-                    ).props('dense outlined dark color=cyan-4').classes('text-white min-w-[160px]').style('font-size: 12px;')
+                    ).props('dense borderless dark color=cyan-4').classes('text-white min-w-[160px]').style('font-size: 12px;')
                 video_image = ui.interactive_image().classes('w-full h-full object-contain')
 
             with ui.row().classes('w-full h-1/4 gap-4 no-wrap'):
