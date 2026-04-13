@@ -1,4 +1,6 @@
 import cv2
+import os
+import glob
 import zmq
 import time
 import base64
@@ -11,7 +13,18 @@ from ultralytics import YOLO
 RASPBERRY_IP = 'robot.local'
 ROS_PORT, TCP_PORT = 9090, 5555
 
-model = YOLO("../models/yolov8n.pt") 
+# --- Model Management ---
+MODELS_DIR = os.path.join(os.path.dirname(__file__), '..', 'models')
+
+def get_available_models():
+    """Scan the models directory and return a list of .pt filenames."""
+    pattern = os.path.join(MODELS_DIR, '*.pt')
+    return sorted([os.path.basename(p) for p in glob.glob(pattern)])
+
+available_models = get_available_models()
+current_model_name = 'yolov8n.pt' if 'yolov8n.pt' in available_models else (available_models[0] if available_models else 'yolov8n.pt')
+model = YOLO(os.path.join(MODELS_DIR, current_model_name))
+model_lock = threading.Lock()  # protects model reloads
 client = roslibpy.Ros(host=RASPBERRY_IP, port=ROS_PORT)
 
 # UI Elements
@@ -25,6 +38,8 @@ confidence_knob = None
 log_container = None
 connection_notified = False
 speed_label = None
+model_select = None
+model_label = None
 action_label = None
 
 latest_frame_b64 = None 
@@ -144,7 +159,28 @@ def update_speed(value: float):
 
 def update_action(text: str):
     if action_label:
-        action_label.text = text       
+        action_label.text = text
+
+def swap_model(new_model_name: str):
+    """Swap the YOLO model at runtime."""
+    global model, current_model_name
+    if new_model_name == current_model_name:
+        return
+    model_path = os.path.join(MODELS_DIR, new_model_name)
+    if not os.path.isfile(model_path):
+        ui.notify(f'Model file not found: {new_model_name}', type='negative')
+        return
+    try:
+        ui.notify(f'Loading model: {new_model_name}…', type='info')
+        new_model = YOLO(model_path)
+        with model_lock:
+            model = new_model
+            current_model_name = new_model_name
+        if model_label:
+            model_label.text = current_model_name
+        ui.notify(f'Model switched to {new_model_name}', type='positive')
+    except Exception as e:
+        ui.notify(f'Failed to load model: {e}', type='negative')
 
 # Map data storage for RViz-style rendering
 map_info = {'width': 0, 'height': 0, 'resolution': 0.05, 'origin_x': 0, 'origin_y': 0, 'data': None}
@@ -361,7 +397,9 @@ def video_stream_loop():
             frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
             if frame is not None:
-                results = model(frame, verbose=False)
+                with model_lock:
+                    current = model
+                results = current(frame, verbose=False)
                 annotated_frame = results[0].plot()
                 
                 _, buffer = cv2.imencode('.jpg', annotated_frame)
@@ -405,7 +443,7 @@ def handle_keyboard(e):
 
 @ui.page('/')
 def main_page():
-    global status_label, battery_chart, video_image, map_image, gas_knob, battery_knob, confidence_knob, log_container, speed_label, action_label
+    global status_label, battery_chart, video_image, map_image, gas_knob, battery_knob, confidence_knob, log_container, speed_label, action_label, model_select, model_label
     
     ui.add_head_html('''
         <style>
@@ -465,6 +503,14 @@ def main_page():
             
             with ui.card().classes('glass-card w-full h-1/2 p-0 relative overflow-hidden bg-black border-2 border-blue-900'):
                 ui.label('LIVE FEED').classes('absolute top-3 left-3 z-10 text-white bg-red-600 px-2 py-0.5 text-xs rounded font-bold shadow-lg')
+                # Model selector overlay (top-right of live feed)
+                with ui.row().classes('absolute top-2 right-3 z-10 items-center gap-2'):
+                    ui.icon('model_training', size='20px').classes('text-cyan-400')
+                    model_select = ui.select(
+                        options=available_models,
+                        value=current_model_name,
+                        on_change=lambda e: swap_model(e.value),
+                    ).props('dense outlined dark color=cyan-4').classes('text-white min-w-[160px]').style('font-size: 12px;')
                 video_image = ui.interactive_image().classes('w-full h-full object-contain')
 
             with ui.row().classes('w-full h-1/4 gap-4 no-wrap'):
@@ -481,7 +527,7 @@ def main_page():
                 with ui.card().classes('glass-card w-1/3 flex flex-col items-center justify-center py-2'):
                     ui.label('CONFIDENCE').classes('text-xs text-purple-300 font-bold mb-1')
                     confidence_knob = ui.knob(85, min=0, max=100, show_value=True, track_color='grey-9', color='purple-4').props('readonly size=70px thickness=0.2')
-                    ui.label('YOLO').classes('text-xs text-gray-500')
+                    model_label = ui.label(current_model_name).classes('text-xs text-gray-500')
 
             with ui.card().classes('glass-card w-full flex-grow'):
                 ui.label('SENSOR HISTORY').classes('text-gray-400 text-xs font-bold tracking-widest')
