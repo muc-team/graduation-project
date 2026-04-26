@@ -3,12 +3,57 @@ import os
 import glob
 import zmq
 import time
+import torch
 import base64
 import roslibpy
 import threading
 import numpy as np
+import torch.nn as nn
 from nicegui import ui, app
 from ultralytics import YOLO
+
+
+class ConcatHead(nn.Module):
+    """Concatenation layer for Detect heads (Custom added for dual-head YOLO)."""
+    def __init__(self, nc1=80, nc2=1, ch=()):
+        super().__init__()
+        self.nc1 = nc1
+        self.nc2 = nc2
+
+    def forward(self, x):
+        if isinstance(x[0], tuple):
+            preds1 = x[0][0]
+            preds2 = x[1][0]
+        elif isinstance(x[0], list):
+            return [torch.cat((x0, x1), dim=1) for x0, x1 in zip(x[0], x[1])]
+        else:
+            preds1 = x[0]
+            preds2 = x[1]
+
+        preds = torch.cat((preds1[:, :4, :], preds2[:, :4, :]), dim=2)
+
+        shape = list(preds1.shape)
+        shape[-1] *= 2
+        preds1_extended = torch.zeros(shape, device=preds1.device, dtype=preds1.dtype)
+        preds1_extended[..., : preds1.shape[-1]] = preds1
+
+        shape = list(preds2.shape)
+        shape[-1] *= 2
+        preds2_extended = torch.zeros(shape, device=preds2.device, dtype=preds2.dtype)
+        preds2_extended[..., preds2.shape[-1] :] = preds2
+
+        preds = torch.cat((preds, preds1_extended[:, 4:, :]), dim=1)
+        preds = torch.cat((preds, preds2_extended[:, 4:, :]), dim=1)
+
+        if isinstance(x[0], tuple):
+            return (preds, x[0][1])
+        else:
+            return preds
+
+# Monkey-patch ConcatHead into ultralytics so torch.load() can find it
+# when deserializing model checkpoints that were trained with this custom head.
+import ultralytics.nn.modules.conv as _conv_module
+_conv_module.ConcatHead = ConcatHead
 
 AVAILABLE_ROBOTS = ['robot.local', 'robot2.local']
 ROBOT_PROFILES = {

@@ -1,187 +1,234 @@
 # Graduation Project: Smart Leading Robot
 
-This project consists of four main components that work together to provide a comprehensive object detection and navigation system for a smart leading robot. The system can be run in different modes: a standalone camera classification script, a web-based Streamlit dashboard, a client-server streaming setup for remote processing, and a ROS-integrated dashboard for advanced control and monitoring.
+This project consists of multiple components that work together to provide a comprehensive object detection, navigation, and control system for a smart rescue/leading robot. The system supports **multiple robots**, **runtime AI model switching**, **real-time SLAM mapping**, **manual & autonomous navigation**, and **live sensor monitoring** — all from a single web-based dashboard.
 
 ## Installation
 
-Before running the scripts, you need to install the required Python libraries. You can install them using pip:
+Before running the scripts, install the required Python libraries:
 
 ```bash
-pip install opencv-python pyttsx3 ultralytics SpeechRecognition numpy streamlit PyAudio roslibpy nicegui
+pip install opencv-python pyttsx3 ultralytics SpeechRecognition numpy streamlit PyAudio roslibpy nicegui pyzmq torch
+```
+
+## Project Structure
+
+```
+graduation/
+├── arduino/                  # Arduino motor controller firmware
+│   ├── Arduino code.txt
+│   ├── motor_controller_v2.ino
+│   └── motor_controller_v2/
+├── classification/           # Camera capture & streaming scripts
+│   ├── camera.py             # Standalone camera with YOLO inference
+│   ├── tcp_rasp.py / tcp_lap.py
+│   ├── tcp_rasp_zmq.py       # ZMQ-based camera streamer (Raspberry Pi)
+│   ├── udp_rasp.py / udp_lap.py
+│   └── mix_rasp.py / mix_lap.py
+├── dashboard/                # Web-based dashboards
+│   ├── dash.py               # Basic ROS dashboard
+│   ├── dash_control.py       # Dashboard with control panel
+│   ├── dash_mapping.py       # ★ Main dashboard (mapping + control + AI)
+│   ├── desktop_app.py        # Tkinter desktop app
+│   ├── index.py              # Streamlit dashboard
+│   ├── map_debug.py          # Map debugging utility
+│   └── professional_dashboard.py
+├── mapping/                  # ROS2 SLAM mapping
+│   ├── start_mapping.py      # Full mapping launch
+│   ├── slam_only.py          # SLAM-only mode
+│   ├── mapper.yaml           # slam_toolbox configuration
+│   └── config.rviz           # RViz visualization config
+├── models/                   # YOLO model weights
+│   ├── yolov8n-fire.pt       # Dual-head fire detection model (custom ConcatHead)
+│   ├── fire.pt               # Fire detection model
+│   ├── yolov8n.pt            # Standard COCO detection
+│   └── yolov8n-seg.pt        # Segmentation model
+├── navigation/               # Robot navigation & control
+│   ├── simple_explorer.py    # Autonomous exploration
+│   ├── control_center.py     # Central control node
+│   ├── manual_control_gui.py # Manual control GUI
+│   ├── motor_controller.py   # Motor driver interface
+│   ├── professional_motor_controller.py
+│   ├── smart_motor_controller.py
+│   ├── emergency_controller.py
+│   ├── start_autonomous.py   # Autonomous navigation launcher
+│   ├── fake_odom.py          # Odometry simulator for testing
+│   └── nav2_params.yaml      # Nav2 navigation parameters
+├── rasp_cmd/                 # Raspberry Pi automation scripts
+│   ├── start_dash.sh         # Launch full dashboard system
+│   ├── start_dash_rasp3.sh   # Variant for Raspberry Pi 3
+│   ├── start_slam.sh         # Launch SLAM only
+│   ├── start_robot.sh        # Full robot startup
+│   ├── start_autonomous.sh   # Autonomous mode startup
+│   ├── start_minimal.sh      # Minimal startup
+│   └── start_lightweight.sh  # Lightweight startup
+├── robot.nxs / robot2.nxs    # NoMachine connection profiles
+└── README.md
 ```
 
 ## Components
 
 ### 1. Standalone Camera Classification (`classification/camera.py`)
 
-This script provides a direct, real-time video feed from the default camera. It uses voice commands to control the object detection process.
+Real-time video feed from a local camera with YOLO object detection.
 
 **Features:**
-
-- **Real-time Object Detection:** Captures video from the camera and uses the YOLOv8 model to detect and segment objects in real-time.
-- **Voice Control:** A voice listener runs in the background.
-  - Say **"go"** to start the object detection.
-  - Say **"stop"** to pause the detection.
-- **Voice Announcements:** When an object is detected for the first time, the system announces it using text-to-speech (e.g., "I found a person").
-- **Visual Feedback:** The video feed displays the segmentation masks and labels for detected objects. The current status (PROCESSING or PAUSED) is also shown on the screen.
+- Real-time object detection using a custom YOLO model (`models/best.pt`)
+- Visual feedback with segmentation masks and labels
 
 **How to Run:**
-
 ```bash
 python classification/camera.py
 ```
-
-Press 'q' on the video window to quit.
+Press `q` on the video window to quit.
 
 ### 2. Streamlit Dashboard (`dashboard/index.py`)
 
-This script launches a web-based dashboard using Streamlit, providing a more user-friendly interface to control and monitor the rescue robot's camera feed.
+A web-based dashboard using Streamlit for controlling and monitoring the camera feed.
 
 **Features:**
-
-- **Interactive Web UI:** A clean and simple dashboard to view the live camera feed.
-- **Control Panel:**
-  - **Start/Stop Buttons:** Easily start and stop the camera feed.
-  - **Detection Confidence Slider:** Adjust the confidence threshold for object detection to filter out less certain detections.
-  - **Voice Announcements Toggle:** Enable or disable the text-to-speech announcements.
-- **Live Data:** Displays the name of the most recently detected object.
-- **Voice Control:** Also supports "go" and "stop" voice commands to control processing, similar to the standalone script.
+- Start/Stop camera feed via buttons
+- Detection confidence slider
+- Voice announcements toggle
+- Live detected object display
 
 **How to Run:**
-To run the dashboard, execute the following command in your terminal:
-
 ```bash
 streamlit run dashboard/index.py
 ```
 
-### 3. Client-Server Streaming (`classification/udp_rasp.py` and `classification/udp_lap.py`)
+### 3. Client-Server Streaming
 
-This component allows for a client-server setup where a Raspberry Pi captures video and streams it to a laptop for processing. This is useful for offloading the heavy processing from the Raspberry Pi.
+Video streaming from Raspberry Pi to a laptop for remote AI processing.
+
+| Protocol | Raspberry Pi Script | Laptop Script |
+|----------|-------------------|---------------|
+| UDP | `classification/udp_rasp.py` | `classification/udp_lap.py` |
+| TCP | `classification/tcp_rasp.py` | `classification/tcp_lap.py` |
+| ZMQ | `classification/tcp_rasp_zmq.py` | — (used by dashboard) |
+
+**How to Run:**
+1. On the Raspberry Pi — update the laptop IP and run the streaming script.
+2. On the Laptop — run the corresponding receiving script.
+
+### 4. ROS-Integrated Dashboard (`dashboard/dash.py`)
+
+Basic dashboard using `nicegui` with ROS integration for robot monitoring.
+
+**Features:**
+- Real-time connection status and logs
+- Battery monitoring with live chart
+- Video feed with YOLO overlays
+
+**How to Run:**
+```bash
+python dashboard/dash.py
+```
+
+### 5. Mapping & Control Dashboard (`dashboard/dash_mapping.py`) ★ Main Dashboard
+
+The primary dashboard providing comprehensive robot control, AI detection, and SLAM mapping. This is the most feature-rich component of the system.
 
 **Features:**
 
-- **Remote Processing:** The Raspberry Pi (`udp_rasp.py`) captures video, encodes it, and sends it over the network to the laptop.
-- **Real-time Object Detection:** The laptop (`udp_lap.py`) receives the video stream, decodes it, and runs the YOLOv8 model for object detection.
-- **Visual Feedback:** The laptop displays the video feed with the segmentation masks and labels for detected objects.
+- **Multi-Robot Support:** Switch between multiple robots (Alpha / Beta) at runtime via a dropdown selector. The dashboard reconnects ROS and ZMQ streams, updates the UI with the active robot's name and icon, and clears stale video frames automatically.
+- **Runtime Model Switching:** Dynamically swap YOLO models from the `models/` directory without restarting. A model selector overlay on the live feed lets you pick any `.pt` file discovered at startup.
+- **Dual-Head YOLO (ConcatHead):** Supports custom YOLO models trained with a `ConcatHead` module for dual-head detection (e.g., fire + general objects). The class is defined within the project and **monkey-patched** into `ultralytics.nn.modules.conv` at runtime, so no modifications to the ultralytics package are needed.
+- **Real-time SLAM Map:** Renders the ROS occupancy grid map with robot pose (green circle + direction arrow) and laser scan overlay (red dots), styled exactly like RViz.
+- **Live Video & AI:** Displays the ZMQ video feed annotated with the active YOLO model's detections.
+- **Sensor Monitoring:** Real-time gauges for Gas Level (PPM), Battery Level (%), and Detection Confidence.
+- **Manual Control:** On-screen D-Pad buttons + full keyboard support (WASD / Arrow keys / Space / Escape).
+- **Autonomous Mode:** Toggle autonomous exploration on/off via the dashboard, publishing to `/explore_enable`.
+- **Emergency Stop:** Dedicated emergency stop button and keyboard shortcut (Escape) with visual confirmation.
+- **Speed Control:** Adjustable speed slider (0.10 – 0.30 m/s).
+- **Incident Logs:** Live log stream from the robot via the `/robot_log` ROS topic.
+- **Sensor History Chart:** Rolling battery level chart.
+
+**Keyboard Controls:**
+
+| Key | Action |
+|-----|--------|
+| `W` / `↑` | Move Forward |
+| `S` / `↓` | Move Backward |
+| `A` / `←` | Turn Left |
+| `D` / `→` | Turn Right |
+| `Space` | Stop |
+| `Escape` | Emergency Stop |
 
 **How to Run:**
 
-_Recommended: Use the automated script (see below)._
+1. **On the Raspberry Pi (Automated):**
+   ```bash
+   chmod +x rasp_cmd/start_dash.sh
+   ./rasp_cmd/start_dash.sh
+   ```
+   This launches: ROS Mapping, ROS Bridge, Camera Streaming, and Map Saver.
 
-1.  **On the Raspberry Pi:**
+2. **On the Laptop:**
+   ```bash
+   python dashboard/dash_mapping.py
+   ```
+   The dashboard opens at `http://localhost:8080`.
 
-    - Update the `LAPTOP_IP` variable in `classification/udp_rasp.py` to the IP address of your laptop.
-    - Run the script:
-      ```bash
-      python classification/udp_rasp.py
-      ```
+**Available Robots:**
 
-2.  **On the Laptop:**
-    - Run the script:
-      ```bash
-      python classification/udp_lap.py
-      ```
+| Hostname | Name | Icon |
+|----------|------|------|
+| `robot.local` | Alpha | 🤖 |
+| `robot2.local` | Beta | ⚙️ |
 
-Press 'q' on the video window to quit.
+### 6. Navigation System (`navigation/`)
 
-### 4. ROS-Integrated Dashboard (`dashboard/dash.py` and `classification/udp_rasp.py`)
+ROS2-based navigation and control modules for the robot.
 
-This component provides an advanced dashboard using `nicegui` that integrates with ROS (Robot Operating System) for more comprehensive robot monitoring and control.
+- **`simple_explorer.py`** — Autonomous frontier-based exploration
+- **`control_center.py`** — Central control node coordinating navigation
+- **`motor_controller.py`** — Low-level motor driver interface
+- **`emergency_controller.py`** — Emergency stop handler
+- **`manual_control_gui.py`** — Standalone manual control GUI
+- **`nav2_params.yaml`** — Nav2 stack configuration
 
-**Features:**
+### 7. Arduino Firmware (`arduino/`)
 
-- **Advanced UI:** A modern, real-time dashboard with status indicators, logs, and sensor metrics.
-- **ROS Integration:** Connects to a ROS master on the robot to receive log messages and battery status.
-- **High-Performance Video:** Uses a UDP-based protocol for streaming video from the Raspberry Pi to the dashboard.
-- **Live Monitoring:** Includes widgets for system status, incident reports/logs, and a live chart for sensor data like battery percentage.
+Motor controller firmware for the Arduino, interfacing with the ROS2 system via serial communication.
 
-**How to Run:**
-
-_Recommended: Use the automated script (see below)._
-
-1.  **On the Raspberry Pi:**
-
-    - First, start the ROS bridge to allow communication. Open a terminal and run:
-      ```bash
-      ros2 launch rosbridge_server rosbridge_websocket_launch.xml
-      ```
-    - In a second terminal, start the video streaming script. Make sure to update the `LAPTOP_IP` variable in `classification/udp_rasp.py` to your laptop's IP address.
-      ```bash
-      python classification/udp_rasp.py
-      ```
-
-2.  **On the Laptop:**
-    - Make sure the `RASPBERRY_IP_ROS` variable in `dashboard/dash.py` is set to your Raspberry Pi's IP address.
-    - Run the dashboard script:
-      ```bash
-      python dashboard/dash.py
-      ```
-    - Open your web browser and navigate to `http://localhost:8080`.
-
-### 5. Mapping & Control Dashboard (`dashboard/dash_mapping.py`)
-
-This component provides a cutting-edge, sci-fi styled dashboard for comprehensive robot control and mapping. It integrates real-time SLAM mapping, video feed with object detection, and sensor monitoring (gas, battery).
-
-**Features:**
-
-- **Real-time SLAM Map:** Visualizes the robot's environment using ROS occupancy grid maps.
-- **Live Video & AI:** Displays video feed with YOLOv8 object detection overlays.
-- **Sensor Monitoring:** Real-time gauges for Gas Level (PPM) and Battery Level (%).
-- **Interactive Controls:** Buttons for Mission Start, Manual Control, Navigation Points, and Emergency Stop.
-- **Status & Logs:** Live connection status and incident reporting logs.
-
-**How to Run:**
-
-1.  **On the Raspberry Pi (Automated):**
-
-    - Navigate to the `rasp_cmd` directory.
-    - Make the script executable: `chmod +x start_dash.sh`
-    - Run the start script (requires GUI/GNOME terminal):
-      ```bash
-      ./rasp_cmd/start_dash.sh
-      ```
-    - This will automatically launch:
-      - ROS Mapping System
-      - ROS Bridge (for WebSocket communication)
-      - Camera Streaming Script
-      - Map Saver Utility
-
-2.  **On the Laptop:**
-    - Update `RASPBERRY_IP` in `dashboard/dash_mapping.py` to your Raspberry Pi's IP.
-    - Run the dashboard:
-      ```bash
-      python dashboard/dash_mapping.py
-      ```
-    - The dashboard will automatically open in your browser (default port 8080).
+- **`motor_controller_v2.ino`** — Latest motor controller with PID control
 
 ## Raspberry Pi Automation Scripts
 
-For convenience, the `rasp_cmd` directory contains shell scripts to automate the startup process on the Raspberry Pi.
+Shell scripts in `rasp_cmd/` to automate robot startup:
 
-### `start_dash.sh`
+| Script | Purpose |
+|--------|---------|
+| `start_dash.sh` | Full dashboard system (mapping + bridge + camera + map saver) |
+| `start_dash_rasp3.sh` | Optimized for Raspberry Pi 3 |
+| `start_slam.sh` | SLAM mapping only |
+| `start_robot.sh` | Full robot system |
+| `start_autonomous.sh` | Autonomous navigation mode |
+| `start_minimal.sh` | Minimal startup |
+| `start_lightweight.sh` | Lightweight startup |
 
-This is the main startup script for the full system. It launches four separate terminal tabs:
+## Custom YOLO Dual-Head (ConcatHead)
 
-1.  **MAPPING SYSTEM:** Starts the ROS2 mapping launch file.
-2.  **ROS BRIDGE:** Starts the websocket server to connect with the dashboard.
-3.  **CAMERA STREAM:** Runs `udp_rasp.py` to stream video to the laptop.
-4.  **SAVE MAP UTILITY:** A helper tab with the command to save the map pre-typed.
+The project uses a custom `ConcatHead` module for dual-head YOLO models (e.g., combining fire detection + general object detection heads). This class is:
 
-**Usage:**
+1. **Defined in** `dashboard/dash_mapping.py`
+2. **Monkey-patched** into `ultralytics.nn.modules.conv` at runtime before model loading
 
-```bash
-cd rasp_cmd
-chmod +x start_dash.sh
-./start_dash.sh
+This means anyone cloning the project can run it directly — **no modifications to the ultralytics package are required**.
+
+```python
+# Automatically injected at startup:
+import ultralytics.nn.modules.conv as _conv_module
+_conv_module.ConcatHead = ConcatHead
 ```
 
-### `start_slam.sh`
+## YOLO Models
 
-Use this script if you only want to run the SLAM mapping without the full dashboard integration.
-**Usage:**
+Place your `.pt` model files in the `models/` directory. The dashboard auto-discovers them at startup and lets you switch between them at runtime.
 
-```bash
-cd rasp_cmd
-chmod +x start_slam.sh
-./start_slam.sh
-```
+| Model | Description |
+|-------|-------------|
+| `yolov8n-fire.pt` | Dual-head fire detection (default, uses ConcatHead) |
+| `fire.pt` | Fire detection |
+| `yolov8n.pt` | Standard COCO object detection |
+| `yolov8n-seg.pt` | Instance segmentation |
