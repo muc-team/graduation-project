@@ -29,8 +29,8 @@ volatile long countM4 = 0;
 
 void readEncoderM1() { if (digitalRead(M1_ENCB) > 0) countM1++; else countM1--; }
 void readEncoderM2() { if (digitalRead(M2_ENCB) > 0) countM2++; else countM2--; }
-void readEncoderM3() { if (digitalRead(M3_ENCB) > 0) countM3++; else countM3--; }
-void readEncoderM4() { if (digitalRead(M4_ENCB) > 0) countM4++; else countM4--; }
+void readEncoderM3() { if (digitalRead(M3_ENCB) > 0) countM3--; else countM3++; }  // Negated: right-side motor wires swapped
+void readEncoderM4() { if (digitalRead(M4_ENCB) > 0) countM4--; else countM4++; }  // Negated: right-side motor wires swapped
 
 int currentSpeed = 150;
 bool eStop = false;

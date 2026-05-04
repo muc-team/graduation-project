@@ -16,7 +16,7 @@ for svc in motors rosbridge camera; do
 done
 
 # Fallback: kill by name
-pkill -f professional_motor_controller.py 2>/dev/null
+pkill -f robot2_bridge.py 2>/dev/null
 pkill -f tcp_rasp.py 2>/dev/null
 pkill -f rosbridge_websocket 2>/dev/null
 

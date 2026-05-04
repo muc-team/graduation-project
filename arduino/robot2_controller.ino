@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════════════════
-//  Motor Controller v3 — Integrated IMU Edition
+//  Robot 2 Controller — Integrated IMU Edition
 //  Arduino Mega 2560 · L298N · 4× Encoders · MPU6050
 //
 //  Streams sensor data at 50 Hz for Raspberry Pi EKF fusion.

@@ -22,7 +22,7 @@ echo ""
 
 # ── Kill any leftover processes from previous runs ──
 echo "[CLEANUP] Stopping any previous services..."
-pkill -f professional_motor_controller.py 2>/dev/null
+pkill -f robot2_bridge.py 2>/dev/null
 pkill -f tcp_rasp.py 2>/dev/null
 pkill -f rosbridge_websocket 2>/dev/null
 sleep 1
@@ -46,7 +46,7 @@ run_bg() {
 # ═══════════════════════════════════════
 # 1. Motor Controller (talks to Arduino)
 # ═══════════════════════════════════════
-run_bg "motors" "cd $DIR/../navigation && python3 professional_motor_controller.py"
+run_bg "motors" "cd $DIR/../navigation && python3 robot2_bridge.py"
 sleep 2
 
 # ═══════════════════════════════════════

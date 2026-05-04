@@ -16,7 +16,7 @@ for svc in lidar slam motors rosbridge explorer; do
 done
 
 # Fallback: kill by name
-pkill -f professional_motor_controller.py 2>/dev/null
+pkill -f robot1_bridge.py 2>/dev/null
 pkill -f simple_explorer.py 2>/dev/null
 pkill -f rplidar 2>/dev/null
 pkill -f slam 2>/dev/null

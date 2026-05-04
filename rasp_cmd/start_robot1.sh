@@ -24,7 +24,7 @@ echo ""
 
 # ── Kill any leftover processes from previous runs ──
 echo "[CLEANUP] Stopping any previous services..."
-pkill -f professional_motor_controller.py 2>/dev/null
+pkill -f robot1_bridge.py 2>/dev/null
 pkill -f simple_explorer.py 2>/dev/null
 pkill -f rplidar 2>/dev/null
 pkill -f slam 2>/dev/null
@@ -63,7 +63,7 @@ sleep 2
 # ═══════════════════════════════════════
 # 3. Motor Controller
 # ═══════════════════════════════════════
-run_bg "motors" "cd $DIR/../navigation && python3 professional_motor_controller.py"
+run_bg "motors" "cd $DIR/../navigation && python3 robot1_bridge.py"
 sleep 1
 
 # ═══════════════════════════════════════

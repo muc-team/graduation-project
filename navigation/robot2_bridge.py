@@ -2,7 +2,7 @@
 """
 Robot 2 (Beta) — Motor & Sensor Bridge for ROS 2
 =================================================
-Pairs with motor_controller_v2.ino (Arduino Mega)
+Pairs with robot2_controller.ino (Arduino Mega)
 
 Responsibilities:
   1. Receive movement commands from dashboard → send to Arduino
