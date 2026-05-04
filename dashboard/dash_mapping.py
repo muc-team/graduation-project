@@ -5,6 +5,7 @@ import zmq
 import time
 import torch
 import base64
+import requests
 import roslibpy
 import threading
 import numpy as np
@@ -55,13 +56,42 @@ class ConcatHead(nn.Module):
 import ultralytics.nn.modules.conv as _conv_module
 _conv_module.ConcatHead = ConcatHead
 
-AVAILABLE_ROBOTS = ['robot.local', 'robot2.local']
+AVAILABLE_ROBOTS = ['robot.local', 'robot2.local', 'robot3.local']
 ROBOT_PROFILES = {
     'robot.local':  {'name': 'Alpha', 'icon': 'smart_toy', 'color': 'text-blue-400'},
     'robot2.local': {'name': 'Beta', 'icon': 'precision_manufacturing', 'color': 'text-orange-400'},
+    'robot3.local': {'name': 'Gamma', 'icon': 'memory', 'color': 'text-green-400', 'esp32': True},
 }
 RASPBERRY_IP = AVAILABLE_ROBOTS[0]
 ROS_PORT, TCP_PORT = 9090, 5555
+
+# --- ESP32 (Robot 3) state ---
+def _is_esp32(ip=None):
+    """Check if the given (or current) robot is an ESP32 HTTP robot."""
+    return ROBOT_PROFILES.get(ip or RASPBERRY_IP, {}).get('esp32', False)
+
+esp32_telemetry = {'d': 0, 'g': 0, 'x': 0, 'y': 0, 'a': 0}
+_esp32_connected = threading.Event()
+_esp32_session = requests.Session()  # persistent HTTP keep-alive for low-latency commands
+
+# Single-slot command queue: always keeps only the latest command
+import queue as _queue_mod
+_esp32_cmd_queue = _queue_mod.Queue(maxsize=1)
+
+def _esp32_worker():
+    """Dedicated thread that sends ESP32 HTTP commands from the queue."""
+    while True:
+        direction = _esp32_cmd_queue.get()  # blocks until a command arrives
+        try:
+            _esp32_session.get(
+                f'http://{RASPBERRY_IP}/control?dir={direction}',
+                timeout=0.5,
+            )
+        except Exception:
+            pass
+
+threading.Thread(target=_esp32_worker, daemon=True).start()
+
 _zmq_reconnect_flag = threading.Event()  # signals the video thread to reconnect
 
 # --- Model Management ---
@@ -96,6 +126,11 @@ robot_select = None
 robot_ip_label = None
 robot_name_label = None
 robot_icon = None
+robot_cards = {}       # {ip: card element} – for active-border highlighting
+robot_status_icons = {}  # {ip: icon element} – per-robot online/offline dot
+
+# Per-robot network reachability (updated by background pinger)
+robot_reachable = {ip: False for ip in AVAILABLE_ROBOTS}
 
 latest_frame_b64 = None 
 latest_map_b64 = None 
@@ -142,9 +177,34 @@ def setup_publishers():
         
         print("✅ ROS Publishers and subscribers ready")
 
+def _esp32_cmd(direction: str):
+    """Queue an HTTP control command — drops any stale pending command first."""
+    # Drain any old command so only the newest one is sent
+    try:
+        _esp32_cmd_queue.get_nowait()
+    except _queue_mod.Empty:
+        pass
+    try:
+        _esp32_cmd_queue.put_nowait(direction)
+    except _queue_mod.Full:
+        pass
+
 def send_twist(linear: float, angular: float):
     """Send velocity command to robot."""
     global manual_topic
+    if _is_esp32():
+        # Map twist to ESP32 direction letters
+        if linear > 0:
+            _esp32_cmd('F')
+        elif linear < 0:
+            _esp32_cmd('B')
+        elif angular > 0:
+            _esp32_cmd('L')
+        elif angular < 0:
+            _esp32_cmd('R')
+        else:
+            _esp32_cmd('S')
+        return
     if manual_topic and client.is_connected and not emergency_stopped:
         manual_topic.publish(roslibpy.Message({
             'linear': {'x': linear, 'y': 0.0, 'z': 0.0},
@@ -186,7 +246,9 @@ def emergency_stop():
     emergency_stopped = True
     held_key = None
     send_twist(0, 0)
-    if estop_topic and client.is_connected:
+    if _is_esp32():
+        _esp32_cmd('S')
+    elif estop_topic and client.is_connected:
         estop_topic.publish(roslibpy.Message({'data': True}))
     update_action("🛑 EMERGENCY STOP")
     ui.notify('EMERGENCY STOP ACTIVATED!', type='negative')
@@ -194,7 +256,7 @@ def emergency_stop():
 def release_emergency():
     global emergency_stopped
     emergency_stopped = False
-    if estop_topic and client.is_connected:
+    if not _is_esp32() and estop_topic and client.is_connected:
         estop_topic.publish(roslibpy.Message({'data': False}))
     update_action("Ready")
     ui.notify('Emergency released', type='positive')
@@ -202,6 +264,9 @@ def release_emergency():
 def toggle_autonomous(enabled: bool):
     global autonomous_mode
     autonomous_mode = enabled
+    if _is_esp32():
+        ui.notify('Autonomous mode not available on ESP32 robot', type='warning')
+        return
     if explore_topic and client.is_connected:
         explore_topic.publish(roslibpy.Message({'data': enabled}))
     update_action("AUTONOMOUS" if enabled else "Manual")
@@ -239,7 +304,7 @@ def swap_model(new_model_name: str):
         ui.notify(f'Failed to load model: {e}', type='negative')
 
 def swap_robot(new_ip: str):
-    """Switch to a different robot by reconnecting ROS and ZMQ."""
+    """Switch to a different robot by reconnecting ROS/ZMQ or ESP32 HTTP."""
     global RASPBERRY_IP, client, connection_notified, _publishers_setup
     global manual_topic, estop_topic, explore_topic
     global map_listener, gas_listener, listener, battery_listener
@@ -251,13 +316,13 @@ def swap_robot(new_ip: str):
 
     ui.notify(f'Switching to {new_ip}…', type='info')
 
-    # --- Tear down old connection ---
+    # --- Tear down old ROS connection (safe even if already closed) ---
     try:
         client.close()
     except Exception:
         pass
 
-    # Reset state
+    # Reset shared state
     manual_topic = None
     estop_topic = None
     explore_topic = None
@@ -267,31 +332,37 @@ def swap_robot(new_ip: str):
     _publishers_setup = False
     latest_frame_b64 = None
     latest_map_b64 = None
+    _esp32_connected.clear()
 
     # Update IP
     RASPBERRY_IP = new_ip
 
-    # --- Create new ROS client & re-subscribe module-level topics ---
-    client = roslibpy.Ros(host=RASPBERRY_IP, port=ROS_PORT)
+    if _is_esp32(new_ip):
+        # --- ESP32 robot: no ROS, no ZMQ ---
+        _zmq_reconnect_flag.set()   # tell ZMQ thread to disconnect
+        _esp32_connected.set()       # wake up ESP32 telemetry thread
+    else:
+        # --- ROS-based robot: reconnect ROS + ZMQ ---
+        client = roslibpy.Ros(host=RASPBERRY_IP, port=ROS_PORT)
 
-    map_listener = roslibpy.Topic(client, '/map', 'nav_msgs/OccupancyGrid')
-    map_listener.subscribe(map_callback)
+        map_listener = roslibpy.Topic(client, '/map', 'nav_msgs/OccupancyGrid')
+        map_listener.subscribe(map_callback)
 
-    gas_listener = roslibpy.Topic(client, '/gas_sensor', 'std_msgs/Float32')
-    gas_listener.subscribe(gas_callback)
+        gas_listener = roslibpy.Topic(client, '/gas_sensor', 'std_msgs/Float32')
+        gas_listener.subscribe(gas_callback)
 
-    listener = roslibpy.Topic(client, '/robot_log', 'std_msgs/String')
-    listener.subscribe(log_callback)
+        listener = roslibpy.Topic(client, '/robot_log', 'std_msgs/String')
+        listener.subscribe(log_callback)
 
-    battery_listener = roslibpy.Topic(client, '/battery_state', 'sensor_msgs/BatteryState')
-    battery_listener.subscribe(battery_callback)
+        battery_listener = roslibpy.Topic(client, '/battery_state', 'sensor_msgs/BatteryState')
+        battery_listener.subscribe(battery_callback)
 
-    # Signal video thread to reconnect ZMQ
-    _zmq_reconnect_flag.set()
+        # Signal video thread to reconnect ZMQ
+        _zmq_reconnect_flag.set()
 
-    # Update UI labels
+    # --- Update UI labels (common) ---
     if robot_ip_label:
-        robot_ip_label.text = f'{RASPBERRY_IP}:{ROS_PORT}'
+        robot_ip_label.text = f'{RASPBERRY_IP}' if _is_esp32(new_ip) else f'{RASPBERRY_IP}:{ROS_PORT}'
     if status_label:
         status_label.text = 'CONNECTING'
         status_label.classes(remove='text-green-400 text-red-500', add='text-yellow-500')
@@ -301,7 +372,7 @@ def swap_robot(new_ip: str):
         robot_name_label.text = profile['name']
     if robot_icon:
         robot_icon._props['name'] = profile['icon']
-        robot_icon.classes(remove='text-blue-400 text-orange-400', add=profile['color'])
+        robot_icon.classes(remove='text-blue-400 text-orange-400 text-green-400', add=profile['color'])
         robot_icon.update()
     # Clear stale frames from previous robot
     if video_image:
@@ -480,6 +551,10 @@ def connect_to_ros_thread():
     global _publishers_setup
     while True:
         try:
+            # Skip ROS connection attempts when an ESP32 robot is active
+            if _is_esp32():
+                time.sleep(2)
+                continue
             if not client.is_connected:
                 _publishers_setup = False
                 client.run()
@@ -491,10 +566,66 @@ def connect_to_ros_thread():
             _publishers_setup = False
             time.sleep(2)
 
+def esp32_telemetry_loop():
+    """Background thread: polls ESP32 /telemetry and updates dashboard gauges."""
+    global esp32_telemetry
+    while True:
+        if not _is_esp32():
+            time.sleep(1)
+            continue
+        try:
+            r = _esp32_session.get(f'http://{RASPBERRY_IP}/telemetry', timeout=1)
+            data = r.json()
+            esp32_telemetry = data
+            _esp32_connected.set()
+
+            # Feed ESP32 gas value into the gas knob (same as gas_callback)
+            if gas_knob:
+                gas_knob.set_value(float(data.get('g', 0)))
+
+        except Exception:
+            _esp32_connected.clear()
+        time.sleep(0.5)
+
+def _ping_robot(ip):
+    """Check if a robot is reachable on the network."""
+    profile = ROBOT_PROFILES.get(ip, {})
+    try:
+        if profile.get('esp32'):
+            r = requests.get(f'http://{ip}/telemetry', timeout=1.5)
+            return r.status_code == 200
+        else:
+            import socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(1.5)
+            s.connect((ip, ROS_PORT))
+            s.close()
+            return True
+    except Exception:
+        return False
+
+def robot_ping_loop():
+    """Background thread: pings all robots every 3s to track reachability."""
+    while True:
+        for ip in AVAILABLE_ROBOTS:
+            robot_reachable[ip] = _ping_robot(ip)
+        time.sleep(3)
+
 def update_connection_status():
     global connection_notified, status_label
+    # --- Update the active-robot status label ---
     if status_label:
-        if client.is_connected:
+        if _is_esp32():
+            if _esp32_connected.is_set():
+                status_label.text = 'ONLINE'
+                status_label.classes(remove='text-red-500 text-yellow-500', add='text-green-400')
+                if not connection_notified:
+                    ui.notify('Connected to ESP32 Robot!', type='positive')
+                    connection_notified = True
+            else:
+                status_label.text = 'OFFLINE'
+                status_label.classes(remove='text-green-400 text-yellow-500', add='text-red-500')
+        elif client.is_connected:
             status_label.text = 'ONLINE'
             status_label.classes(remove='text-red-500 text-yellow-500', add='text-green-400')
             if not connection_notified:
@@ -503,6 +634,25 @@ def update_connection_status():
         else:
             status_label.text = 'OFFLINE'
             status_label.classes(remove='text-green-400 text-yellow-500', add='text-red-500')
+
+    # --- Update per-robot fleet cards ---
+    for ip in AVAILABLE_ROBOTS:
+        reachable = robot_reachable.get(ip, False)
+        icon_el = robot_status_icons.get(ip)
+        card_el = robot_cards.get(ip)
+        if icon_el:
+            if reachable:
+                icon_el._props['name'] = 'wifi'
+                icon_el.classes(remove='text-red-500', add='text-green-400')
+            else:
+                icon_el._props['name'] = 'wifi_off'
+                icon_el.classes(remove='text-green-400', add='text-red-500')
+            icon_el.update()
+        if card_el:
+            if ip == RASPBERRY_IP:
+                card_el.classes(remove='border-transparent', add='border-cyan-400')
+            else:
+                card_el.classes(remove='border-cyan-400', add='border-transparent')
 
 def video_stream_loop():
     global latest_frame_b64, frame_counter
@@ -539,6 +689,11 @@ def video_stream_loop():
         # --- Clean up any previous socket ---
         _cleanup()
         _zmq_reconnect_flag.clear()
+
+        # If the current robot is ESP32, no ZMQ stream — just idle
+        if _is_esp32():
+            _zmq_reconnect_flag.wait()   # block until robot is switched
+            continue
 
         # --- Create fresh socket ---
         target_ip = RASPBERRY_IP  # snapshot current target
@@ -644,39 +799,29 @@ def main_page():
         
         with ui.column().classes('w-1/4 h-full gap-4'):
             
+            # --- SWARM FLEET: clickable robot list ---
             with ui.card().classes('glass-card w-full p-4'):
-                ui.label('ROBOT STATUS').classes('text-gray-400 text-xs font-bold tracking-widest mb-2')
-                with ui.row().classes('items-center justify-between w-full'):
-                    with ui.row().classes('items-center gap-3'):
-                        _profile = ROBOT_PROFILES.get(RASPBERRY_IP, {'name': RASPBERRY_IP, 'icon': 'smart_toy', 'color': 'text-blue-400'})
-                        robot_icon = ui.icon(_profile['icon'], size='32px').classes(_profile['color'])
-                        with ui.column().classes('gap-0'):
-                            robot_name_label = ui.label(_profile['name']).classes('text-white font-bold text-lg leading-none')
-                            robot_ip_label = ui.label(f'{RASPBERRY_IP}:{ROS_PORT}').classes('text-cyan-400 text-xs font-mono mt-1')
-                    status_label = ui.label('CONNECTING').classes('text-yellow-500 font-bold text-sm')
-                # Robot selector
-                with ui.row().classes('w-full items-center gap-2 mt-2'):
-                    ui.icon('swap_horiz', size='18px').classes('text-cyan-400')
-                    _robot_options = {ip: ROBOT_PROFILES.get(ip, {'name': ip})['name'] for ip in AVAILABLE_ROBOTS}
-                    robot_select = ui.select(
-                        options=_robot_options,
-                        value=RASPBERRY_IP,
-                        on_change=lambda e: swap_robot(e.value),
-                    ).props('dense borderless dark color=cyan-4').classes('text-white flex-grow').style('font-size: 12px;')
-            
-            with ui.card().classes('glass-card w-full h-1/4'):
-                ui.label('SIGNAL STRENGTH').classes('text-gray-400 text-xs font-bold tracking-widest mb-1')
-                ui.echart({
-                    'grid': {'top': 10, 'bottom': 10, 'left': 0, 'right': 0},
-                    'xAxis': {'type': 'category', 'show': False},
-                    'yAxis': {'type': 'value', 'show': False},
-                    'series': [{
-                        'data': [10, 40, 30, 70, 50, 80, 60, 90, 40, 70],
-                        'type': 'line', 'smooth': True, 'showSymbol': False,
-                        'lineStyle': {'color': '#60a5fa', 'width': 3},
-                        'areaStyle': {'color': {'type': 'linear', 'x': 0, 'y': 0, 'x2': 0, 'y2': 1, 'colorStops': [{'offset': 0, 'color': '#60a5fa'}, {'offset': 1, 'color': 'transparent'}]}}
-                    }]
-                }).classes('w-full h-full')
+                ui.label('SWARM FLEET').classes('text-gray-400 text-xs font-bold tracking-widest mb-3')
+                status_label = ui.label('CONNECTING').classes('text-yellow-500 font-bold text-sm hidden')  # hidden but still updated
+                for _ip in AVAILABLE_ROBOTS:
+                    _prof = ROBOT_PROFILES.get(_ip, {'name': _ip, 'icon': 'smart_toy', 'color': 'text-blue-400'})
+                    _is_active = (_ip == RASPBERRY_IP)
+                    _border = 'border-cyan-400' if _is_active else 'border-transparent'
+                    _card = ui.card().classes(
+                        f'w-full p-3 cursor-pointer border-2 {_border} '
+                        'rounded-xl transition-all duration-200 hover:bg-white/5'
+                    ).style('background: rgba(15, 23, 42, 0.6);')
+                    _card.on('click', lambda _ip=_ip: swap_robot(_ip))
+                    robot_cards[_ip] = _card
+                    with _card:
+                        with ui.row().classes('items-center justify-between w-full'):
+                            with ui.row().classes('items-center gap-3'):
+                                ui.icon(_prof['icon'], size='26px').classes(_prof['color'])
+                                with ui.column().classes('gap-0'):
+                                    ui.label(_prof['name']).classes('text-white font-bold text-sm leading-none')
+                                    ui.label(_ip).classes('text-gray-500 text-xs font-mono mt-0.5')
+                            _st_icon = ui.icon('wifi_off', size='20px').classes('text-red-500')
+                            robot_status_icons[_ip] = _st_icon
 
             with ui.card().classes('glass-card w-full flex-grow flex flex-col justify-between'):
                 with ui.column().classes('w-full h-full'):
@@ -700,7 +845,7 @@ def main_page():
             with ui.row().classes('w-full h-1/4 gap-4 no-wrap'):
                 with ui.card().classes('glass-card w-1/3 flex flex-col items-center justify-center py-2'):
                     ui.label('GAS LEVEL').classes('text-xs text-blue-300 font-bold mb-1')
-                    gas_knob = ui.knob(0, min=0, max=1000, show_value=True, track_color='grey-9', color='cyan-4').props('readonly size=70px thickness=0.2')
+                    gas_knob = ui.knob(0, min=0, max=4000, show_value=True, track_color='grey-9', color='cyan-4').props('readonly size=70px thickness=0.2')
                     ui.label('PPM').classes('text-xs text-gray-500')
                 
                 with ui.card().classes('glass-card w-1/3 flex flex-col items-center justify-center py-2'):
@@ -762,15 +907,6 @@ def main_page():
                     ui.button('🛑 STOP', on_click=emergency_stop).classes('flex-grow h-12 bg-red-600 hover:bg-red-500 text-white font-bold rounded-lg')
                     ui.button('✓', on_click=release_emergency).classes('w-12 h-12 bg-green-600 hover:bg-green-500 text-white font-bold rounded-lg')
             
-            # Keyboard Hints
-            with ui.card().classes('glass-card w-full p-3 flex-grow'):
-                ui.label('KEYBOARD').classes('text-gray-400 text-xs font-bold tracking-widest mb-2')
-                ui.label('W/↑ Forward').classes('text-gray-500 text-xs')
-                ui.label('S/↓ Backward').classes('text-gray-500 text-xs')
-                ui.label('A/← Turn Left').classes('text-gray-500 text-xs')
-                ui.label('D/→ Turn Right').classes('text-gray-500 text-xs')
-                ui.label('Space: Stop').classes('text-gray-500 text-xs')
-                ui.label('Esc: Emergency').classes('text-gray-500 text-xs')
 
     ui.timer(1.0, update_connection_status)
     ui.timer(0.05, update_ui_content)
@@ -780,5 +916,9 @@ if __name__ in {"__main__", "__mp_main__"}:
     t1.start()
     t2 = threading.Thread(target=video_stream_loop, daemon=True)
     t2.start()
+    t3 = threading.Thread(target=esp32_telemetry_loop, daemon=True)
+    t3.start()
+    t4 = threading.Thread(target=robot_ping_loop, daemon=True)
+    t4.start()
     
     ui.run(title='Sci-Fi Robot Dashboard', dark=True, port=8080, reload=False)
