@@ -16,7 +16,7 @@ Features:
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from std_msgs.msg import Bool, String, Float32
+from std_msgs.msg import Bool, String, Float32, Int32MultiArray
 import serial
 import time
 import threading
@@ -60,10 +60,11 @@ class ProfessionalMotorController(Node):
         
         # Publishers
         self.status_pub = self.create_publisher(String, '/motor_status', 10)
+        self.encoder_pub = self.create_publisher(Int32MultiArray, '/encoders', 10)
         
         # Timers
         self.timer = self.create_timer(0.1, self.check_manual_timeout)
-        self.status_timer = self.create_timer(1.0, self.request_status)
+        self.status_timer = self.create_timer(0.2, self.request_status)  # 5 Hz for responsive encoder updates
         
         self.get_logger().info('Professional Motor Controller started')
         self.get_logger().info(f'Connected: {self.connected}')
@@ -203,6 +204,9 @@ class ProfessionalMotorController(Node):
         if self.connected:
             self.send_command('?')
             
+            # Small delay to allow Arduino to respond
+            time.sleep(0.05)
+            
             # Read status response
             if self.arduino and self.arduino.in_waiting:
                 try:
@@ -211,8 +215,20 @@ class ProfessionalMotorController(Node):
                         status = String()
                         status.data = response
                         self.status_pub.publish(status)
-                except:
-                    pass
+                        
+                        # Parse encoder values from STS:speed,estop,enc1,enc2,enc3,enc4
+                        parts = response[4:].split(',')
+                        if len(parts) >= 6:
+                            enc_msg = Int32MultiArray()
+                            enc_msg.data = [
+                                int(parts[2]),  # M1 - Front Left
+                                int(parts[3]),  # M2 - Rear Left
+                                int(parts[4]),  # M3 - Front Right
+                                int(parts[5]),  # M4 - Rear Right
+                            ]
+                            self.encoder_pub.publish(enc_msg)
+                except Exception as e:
+                    self.get_logger().debug(f'Status parse error: {e}')
     
     def destroy_node(self):
         """Clean shutdown"""
