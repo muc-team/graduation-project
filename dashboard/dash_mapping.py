@@ -129,6 +129,9 @@ robot_icon = None
 robot_cards = {}       # {ip: card element} – for active-border highlighting
 robot_status_icons = {}  # {ip: icon element} – per-robot online/offline dot
 
+encoder_labels = [None, None, None, None]
+encoder_listener = None
+
 # Per-robot network reachability (updated by background pinger)
 robot_reachable = {ip: False for ip in AVAILABLE_ROBOTS}
 
@@ -143,24 +146,19 @@ ui_map_counter = 0
 # Manual Control State
 current_speed = 0.15
 held_key = None
-emergency_stopped = False
 autonomous_mode = False
 
 # ROS Publishers (initialize after connection)
 manual_topic = None
-estop_topic = None
 _publishers_setup = False
 explore_topic = None
 
 def setup_publishers():
     """Setup ROS publishers and additional subscribers after connection."""
-    global manual_topic, estop_topic, explore_topic, odom_listener, scan_listener
+    global manual_topic, explore_topic, odom_listener, scan_listener
     if client.is_connected:
         manual_topic = roslibpy.Topic(client, '/manual_cmd', 'geometry_msgs/Twist')
         manual_topic.advertise()
-        
-        estop_topic = roslibpy.Topic(client, '/emergency_stop', 'std_msgs/Bool')
-        estop_topic.advertise()
         
         explore_topic = roslibpy.Topic(client, '/explore_enable', 'std_msgs/Bool')
         explore_topic.advertise()
@@ -205,7 +203,7 @@ def send_twist(linear: float, angular: float):
         else:
             _esp32_cmd('S')
         return
-    if manual_topic and client.is_connected and not emergency_stopped:
+    if manual_topic and client.is_connected:
         manual_topic.publish(roslibpy.Message({
             'linear': {'x': linear, 'y': 0.0, 'z': 0.0},
             'angular': {'x': 0.0, 'y': 0.0, 'z': angular}
@@ -240,26 +238,6 @@ def stop_robot():
     held_key = None
     send_twist(0, 0)
     update_action("Stopped")
-
-def emergency_stop():
-    global emergency_stopped, held_key
-    emergency_stopped = True
-    held_key = None
-    send_twist(0, 0)
-    if _is_esp32():
-        _esp32_cmd('S')
-    elif estop_topic and client.is_connected:
-        estop_topic.publish(roslibpy.Message({'data': True}))
-    update_action("🛑 EMERGENCY STOP")
-    ui.notify('EMERGENCY STOP ACTIVATED!', type='negative')
-
-def release_emergency():
-    global emergency_stopped
-    emergency_stopped = False
-    if not _is_esp32() and estop_topic and client.is_connected:
-        estop_topic.publish(roslibpy.Message({'data': False}))
-    update_action("Ready")
-    ui.notify('Emergency released', type='positive')
 
 def toggle_autonomous(enabled: bool):
     global autonomous_mode
@@ -306,9 +284,9 @@ def swap_model(new_model_name: str):
 def swap_robot(new_ip: str):
     """Switch to a different robot by reconnecting ROS/ZMQ or ESP32 HTTP."""
     global RASPBERRY_IP, client, connection_notified, _publishers_setup
-    global manual_topic, estop_topic, explore_topic
+    global manual_topic, explore_topic
     global map_listener, gas_listener, listener, battery_listener
-    global odom_listener, scan_listener
+    global odom_listener, scan_listener, encoder_listener
     global latest_frame_b64, latest_map_b64
 
     if new_ip == RASPBERRY_IP:
@@ -324,10 +302,10 @@ def swap_robot(new_ip: str):
 
     # Reset shared state
     manual_topic = None
-    estop_topic = None
     explore_topic = None
     odom_listener = None
     scan_listener = None
+    encoder_listener = None
     connection_notified = False
     _publishers_setup = False
     latest_frame_b64 = None
@@ -356,6 +334,9 @@ def swap_robot(new_ip: str):
 
         battery_listener = roslibpy.Topic(client, '/battery_state', 'sensor_msgs/BatteryState')
         battery_listener.subscribe(battery_callback)
+
+        encoder_listener = roslibpy.Topic(client, '/encoders', 'std_msgs/Int32MultiArray')
+        encoder_listener.subscribe(encoder_callback)
 
         # Signal video thread to reconnect ZMQ
         _zmq_reconnect_flag.set()
@@ -546,6 +527,17 @@ def battery_callback(message):
 
 battery_listener = roslibpy.Topic(client, '/battery_state', 'sensor_msgs/BatteryState')
 battery_listener.subscribe(battery_callback)
+
+def encoder_callback(message):
+    data = message.get('data', [])
+    if len(data) >= 4:
+        if encoder_labels[0]: encoder_labels[0].text = str(data[0])
+        if encoder_labels[1]: encoder_labels[1].text = str(data[1])
+        if encoder_labels[2]: encoder_labels[2].text = str(data[2])
+        if encoder_labels[3]: encoder_labels[3].text = str(data[3])
+
+encoder_listener = roslibpy.Topic(client, '/encoders', 'std_msgs/Int32MultiArray')
+encoder_listener.subscribe(encoder_callback)
 
 def connect_to_ros_thread():
     global _publishers_setup
@@ -765,8 +757,6 @@ def handle_keyboard(e):
             turn_right()
         elif key == ' ':
             stop_robot()
-        elif key == 'escape':
-            emergency_stop()
     elif e.action.keyup:
         if key in ['w', 's', 'a', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright']:
             stop_robot()
@@ -900,12 +890,24 @@ def main_page():
                     ui.label('Autonomous').classes('text-gray-400')
                     ui.switch(on_change=lambda e: toggle_autonomous(e.value)).classes('text-cyan-400')
             
-            # Emergency Controls
+
+            # Encoder Data Display
             with ui.card().classes('glass-card w-full p-3'):
-                ui.label('EMERGENCY').classes('text-gray-400 text-xs font-bold tracking-widest mb-2')
-                with ui.row().classes('w-full gap-2'):
-                    ui.button('🛑 STOP', on_click=emergency_stop).classes('flex-grow h-12 bg-red-600 hover:bg-red-500 text-white font-bold rounded-lg')
-                    ui.button('✓', on_click=release_emergency).classes('w-12 h-12 bg-green-600 hover:bg-green-500 text-white font-bold rounded-lg')
+                ui.label('WHEEL ENCODERS').classes('text-gray-400 text-xs font-bold tracking-widest mb-2')
+                with ui.row().classes('w-full justify-between gap-1'):
+                    with ui.column().classes('items-center gap-0 w-[48%] bg-black/30 p-2 rounded'):
+                        ui.label('Front L').classes('text-[10px] text-gray-500')
+                        encoder_labels[0] = ui.label('0').classes('text-sm text-cyan-400 font-mono')
+                    with ui.column().classes('items-center gap-0 w-[48%] bg-black/30 p-2 rounded'):
+                        ui.label('Front R').classes('text-[10px] text-gray-500')
+                        encoder_labels[2] = ui.label('0').classes('text-sm text-cyan-400 font-mono')
+                    with ui.column().classes('items-center gap-0 w-[48%] bg-black/30 p-2 rounded'):
+                        ui.label('Rear L').classes('text-[10px] text-gray-500')
+                        encoder_labels[1] = ui.label('0').classes('text-sm text-cyan-400 font-mono')
+                    with ui.column().classes('items-center gap-0 w-[48%] bg-black/30 p-2 rounded'):
+                        ui.label('Rear R').classes('text-[10px] text-gray-500')
+                        encoder_labels[3] = ui.label('0').classes('text-sm text-cyan-400 font-mono')
+
             
 
     ui.timer(1.0, update_connection_status)
