@@ -68,6 +68,7 @@ class Robot2Bridge(Node):
 
         # ── Timers ──
         self.create_timer(0.1, self._check_manual_timeout)
+        self.create_timer(0.1, self._poll_status)  # Poll Arduino for STS: data (old firmware compat)
 
         # ── Serial Reader Thread ──
         self._reader_thread = threading.Thread(target=self._serial_reader, daemon=True)
@@ -119,6 +120,10 @@ class Robot2Bridge(Node):
             self.connected = False
             return False
 
+    def _poll_status(self):
+        """Periodically send '?' to request STS: data (old firmware compatibility)."""
+        self._send('?')
+
     def _serial_reader(self):
         """Background thread: continuously reads and parses Arduino data."""
         while rclpy.ok():
@@ -133,12 +138,28 @@ class Robot2Bridge(Node):
                 if line.startswith('D:'):
                     self._parse_sensor_data(line)
                 elif line.startswith('STS:'):
-                    # Fallback for old firmware
-                    status_msg = String()
-                    status_msg.data = line
-                    self.status_pub.publish(status_msg)
+                    # Old firmware: STS:speed,estop,enc1,enc2,enc3,enc4
+                    self._parse_sts_data(line)
             except Exception:
                 time.sleep(0.1)
+
+    def _parse_sts_data(self, line: str):
+        """Parse old firmware format: STS:speed,estop,enc1,enc2,enc3,enc4"""
+        try:
+            # Publish raw status string for dashboard
+            status_msg = String()
+            status_msg.data = line
+            self.status_pub.publish(status_msg)
+
+            # Also publish encoder values as Int32MultiArray
+            parts = line[4:].split(',')
+            if len(parts) >= 6:
+                encs = [int(parts[2]), int(parts[3]), int(parts[4]), int(parts[5])]
+                enc_msg = Int32MultiArray()
+                enc_msg.data = encs
+                self.encoder_pub.publish(enc_msg)
+        except (ValueError, IndexError) as e:
+            self.get_logger().debug(f'STS parse error: {e}')
 
     def _parse_sensor_data(self, line: str):
         """Parse: D:timestamp,e1,e2,e3,e4,ax,ay,az,gx,gy,gz"""

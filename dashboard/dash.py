@@ -285,7 +285,7 @@ def swap_robot(new_ip: str):
     """Switch to a different robot by reconnecting ROS/ZMQ or ESP32 HTTP."""
     global RASPBERRY_IP, client, connection_notified, _publishers_setup
     global manual_topic, explore_topic
-    global map_listener, gas_listener, listener, battery_listener
+    global map_listener, gas_listener, listener, battery_listener, encoders_listener
     global odom_listener, scan_listener, status_listener
     global latest_frame_b64, latest_map_b64
 
@@ -337,6 +337,15 @@ def swap_robot(new_ip: str):
 
         status_listener = roslibpy.Topic(client, '/motor_status', 'std_msgs/String')
         status_listener.subscribe(status_callback)
+
+        encoders_listener = roslibpy.Topic(client, '/encoders', 'std_msgs/Int32MultiArray')
+        encoders_listener.subscribe(encoders_callback)
+
+        # Reset encoder display for new robot
+        latest_encoders[0] = '0'
+        latest_encoders[1] = '0'
+        latest_encoders[2] = '0'
+        latest_encoders[3] = '0'
 
         # Signal video thread to reconnect ZMQ
         _zmq_reconnect_flag.set()
@@ -544,6 +553,7 @@ latest_encoders = ['0', '0', '0', '0']
 def status_callback(message):
     global latest_encoders
     data = message.get('data', '')
+    print(f"DEBUG Motor Status: {data}")
     if data.startswith('STS:'):
         parts = data[4:].split(',')
         if len(parts) >= 6:
@@ -552,8 +562,22 @@ def status_callback(message):
             latest_encoders[2] = parts[4]
             latest_encoders[3] = parts[5]
 
+def encoders_callback(message):
+    """Fallback: read /encoders (Int32MultiArray) from robot2_bridge."""
+    global latest_encoders
+    data = message.get('data', [])
+    print(f"DEBUG Encoders Array: {data}")
+    if len(data) >= 4:
+        latest_encoders[0] = str(data[0])
+        latest_encoders[1] = str(data[1])
+        latest_encoders[2] = str(data[2])
+        latest_encoders[3] = str(data[3])
+
 status_listener = roslibpy.Topic(client, '/motor_status', 'std_msgs/String')
 status_listener.subscribe(status_callback)
+
+encoders_listener = roslibpy.Topic(client, '/encoders', 'std_msgs/Int32MultiArray')
+encoders_listener.subscribe(encoders_callback)
 
 def connect_to_ros_thread():
     global _publishers_setup
