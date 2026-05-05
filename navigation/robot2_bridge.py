@@ -132,6 +132,11 @@ class Robot2Bridge(Node):
                 line = raw.decode(errors='ignore').strip()
                 if line.startswith('D:'):
                     self._parse_sensor_data(line)
+                elif line.startswith('STS:'):
+                    # Fallback for old firmware
+                    status_msg = String()
+                    status_msg.data = line
+                    self.status_pub.publish(status_msg)
             except Exception:
                 time.sleep(0.1)
 
