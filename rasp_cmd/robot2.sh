@@ -10,6 +10,11 @@ ROS_SOURCE="source /opt/ros/humble/setup.bash"
 # Kill any existing session
 tmux kill-session -t $SESSION 2>/dev/null
 
+# Grant permissions to serial ports
+sudo chmod 666 /dev/ttyUSB0 2>/dev/null
+sudo chmod 666 /dev/ttyUSB1 2>/dev/null
+sudo chmod 666 /dev/ttyACM0 2>/dev/null
+
 # 1. MOTOR BRIDGE (Talks to Arduino + IMU)
 tmux new-session -d -s $SESSION -n "Motors" "$ROS_SOURCE; cd $DIR/../navigation && python3 robot2_bridge.py; exec bash"
 

@@ -286,7 +286,7 @@ def swap_robot(new_ip: str):
     global RASPBERRY_IP, client, connection_notified, _publishers_setup
     global manual_topic, explore_topic
     global map_listener, gas_listener, listener, battery_listener
-    global odom_listener, scan_listener, encoder_listener
+    global odom_listener, scan_listener, status_listener
     global latest_frame_b64, latest_map_b64
 
     if new_ip == RASPBERRY_IP:
@@ -305,7 +305,7 @@ def swap_robot(new_ip: str):
     explore_topic = None
     odom_listener = None
     scan_listener = None
-    encoder_listener = None
+    status_listener = None
     connection_notified = False
     _publishers_setup = False
     latest_frame_b64 = None
@@ -335,8 +335,8 @@ def swap_robot(new_ip: str):
         battery_listener = roslibpy.Topic(client, '/battery_state', 'sensor_msgs/BatteryState')
         battery_listener.subscribe(battery_callback)
 
-        encoder_listener = roslibpy.Topic(client, '/encoders', 'std_msgs/Int32MultiArray')
-        encoder_listener.subscribe(encoder_callback)
+        status_listener = roslibpy.Topic(client, '/motor_status', 'std_msgs/String')
+        status_listener.subscribe(status_callback)
 
         # Signal video thread to reconnect ZMQ
         _zmq_reconnect_flag.set()
@@ -377,9 +377,16 @@ def map_callback(msg):
         map_info['resolution'] = msg['info']['resolution']
         map_info['origin_x'] = msg['info']['origin']['position']['x']
         map_info['origin_y'] = msg['info']['origin']['position']['y']
-        map_info['data'] = np.array(msg['data'], dtype=np.int8)
+        
+        # rosbridge_server might base64 encode byte arrays
+        if isinstance(msg['data'], str):
+            import base64
+            decoded = base64.b64decode(msg['data'])
+            map_info['data'] = np.frombuffer(decoded, dtype=np.int8)
+        else:
+            map_info['data'] = np.array(msg['data'], dtype=np.int8)
     except Exception as e:
-        pass
+        print(f"Error in map_callback: {e}")
 
 def pose_callback(msg):
     """Get robot pose from odometry."""
@@ -393,7 +400,7 @@ def pose_callback(msg):
         cosy = 1.0 - 2.0 * (q['y'] * q['y'] + q['z'] * q['z'])
         robot_pose['theta'] = np.arctan2(siny, cosy)
     except Exception as e:
-        pass
+        print(f"Error in pose_callback: {e}")
 
 def scan_callback(msg):
     """Get laser scan points for overlay."""
@@ -470,7 +477,7 @@ def render_rviz_map():
         map_counter += 1
         
     except Exception as e:
-        pass
+        print(f"Error in render_rviz_map: {e}")
 
 # Subscribe to map, odometry, and laser scan (RViz-style)
 # Note: These will be re-subscribed after connection in setup_publishers()
@@ -492,7 +499,10 @@ def start_map_render_timer():
     
     def render_loop():
         while True:
-            render_rviz_map()
+            try:
+                render_rviz_map()
+            except Exception as e:
+                print(f"Map Render Thread Error: {e}")
             time.sleep(0.1)  # 10 FPS
     
     t = threading.Thread(target=render_loop, daemon=True)
@@ -528,16 +538,22 @@ def battery_callback(message):
 battery_listener = roslibpy.Topic(client, '/battery_state', 'sensor_msgs/BatteryState')
 battery_listener.subscribe(battery_callback)
 
-def encoder_callback(message):
-    data = message.get('data', [])
-    if len(data) >= 4:
-        if encoder_labels[0]: encoder_labels[0].text = str(data[0])
-        if encoder_labels[1]: encoder_labels[1].text = str(data[1])
-        if encoder_labels[2]: encoder_labels[2].text = str(data[2])
-        if encoder_labels[3]: encoder_labels[3].text = str(data[3])
+# Store latest encoder values
+latest_encoders = ['0', '0', '0', '0']
 
-encoder_listener = roslibpy.Topic(client, '/encoders', 'std_msgs/Int32MultiArray')
-encoder_listener.subscribe(encoder_callback)
+def status_callback(message):
+    global latest_encoders
+    data = message.get('data', '')
+    if data.startswith('STS:'):
+        parts = data[4:].split(',')
+        if len(parts) >= 6:
+            latest_encoders[0] = parts[2]
+            latest_encoders[1] = parts[3]
+            latest_encoders[2] = parts[4]
+            latest_encoders[3] = parts[5]
+
+status_listener = roslibpy.Topic(client, '/motor_status', 'std_msgs/String')
+status_listener.subscribe(status_callback)
 
 def connect_to_ros_thread():
     global _publishers_setup
@@ -741,6 +757,11 @@ def update_ui_content():
     if map_image and latest_map_b64 and (map_counter > ui_map_counter):
         map_image.set_source(latest_map_b64)
         ui_map_counter = map_counter
+        
+    # Safely update encoder labels
+    for i in range(4):
+        if encoder_labels[i] and encoder_labels[i].text != latest_encoders[i]:
+            encoder_labels[i].text = latest_encoders[i]
 
 def handle_keyboard(e):
     """Handle keyboard events for robot control."""
