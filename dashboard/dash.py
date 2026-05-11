@@ -553,7 +553,6 @@ latest_encoders = ['0', '0', '0', '0']
 def status_callback(message):
     global latest_encoders
     data = message.get('data', '')
-    print(f"DEBUG Motor Status: {data}")
     if data.startswith('STS:'):
         parts = data[4:].split(',')
         if len(parts) >= 6:
@@ -566,7 +565,6 @@ def encoders_callback(message):
     """Fallback: read /encoders (Int32MultiArray) from robot2_bridge."""
     global latest_encoders
     data = message.get('data', [])
-    print(f"DEBUG Encoders Array: {data}")
     if len(data) >= 4:
         latest_encoders[0] = str(data[0])
         latest_encoders[1] = str(data[1])

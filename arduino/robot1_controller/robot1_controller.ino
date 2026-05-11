@@ -33,8 +33,7 @@ unsigned long lastCommandTime = 0;
 void setup() {
     Serial.begin(115200);
     
-    int pins[] = {FR_PWM, FR_IN1, FR_IN2, FL_PWM, FL_IN1, FL_IN2,
-                  RR_PWM, RR_IN1, RR_IN2, RL_PWM, RL_IN1, RL_IN2};
+    int pins[] = {FR_PWM, FR_IN1, FR_IN2, FL_PWM, FL_IN1, FL_IN2, RR_PWM, RR_IN1, RR_IN2, RL_PWM, RL_IN1, RL_IN2};
     for (int i = 0; i < 12; i++) pinMode(pins[i], OUTPUT);
     
     stopAllMotors();
