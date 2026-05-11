@@ -354,9 +354,6 @@ def swap_robot(new_ip: str):
         listener = roslibpy.Topic(client, '/robot_log', 'std_msgs/String')
         listener.subscribe(log_callback)
 
-        battery_listener = roslibpy.Topic(client, '/battery_state', 'sensor_msgs/BatteryState')
-        battery_listener.subscribe(battery_callback)
-
         status_listener = roslibpy.Topic(client, '/motor_status', 'std_msgs/String')
         status_listener.subscribe(status_callback)
 
@@ -626,19 +623,6 @@ def log_callback(message):
 
 listener = roslibpy.Topic(client, '/robot_log', 'std_msgs/String')
 listener.subscribe(log_callback)
-
-def battery_callback(message):
-    val = message.get('percentage', 0)
-    if battery_knob:
-        battery_knob.set_value(val)
-    if battery_chart:
-        battery_chart.options['series'][0]['data'].append(val)
-        if len(battery_chart.options['series'][0]['data']) > 20:
-            battery_chart.options['series'][0]['data'].pop(0)
-        battery_chart.update()
-
-battery_listener = roslibpy.Topic(client, '/battery_state', 'sensor_msgs/BatteryState')
-battery_listener.subscribe(battery_callback)
 
 # Store latest encoder values
 latest_encoders = ['0', '0', '0', '0']
@@ -974,24 +958,21 @@ def main_page():
                     gas_knob = ui.knob(0, min=0, max=4000, show_value=True, track_color='grey-9', color='cyan-4').props('readonly size=70px thickness=0.2')
                     ui.label('PPM').classes('text-xs text-gray-500')
                 
-                with ui.card().classes('glass-card w-1/3 flex flex-col items-center justify-center py-2'):
-                    ui.label('BATTERY').classes('text-xs text-orange-300 font-bold mb-1')
-                    battery_knob = ui.knob(0, min=0, max=100, show_value=True, track_color='grey-9', color='orange-4').props('readonly size=70px thickness=0.2')
-                    ui.label('%').classes('text-xs text-gray-500')
-
-                with ui.card().classes('glass-card w-1/3 flex flex-col items-center justify-center py-2'):
-                    ui.label('CONFIDENCE').classes('text-xs text-purple-300 font-bold mb-1')
-                    confidence_knob = ui.knob(85, min=0, max=100, show_value=True, track_color='grey-9', color='purple-4').props('readonly size=70px thickness=0.2')
-                    model_label = ui.label(current_model_name).classes('text-xs text-gray-500')
-
-            with ui.card().classes('glass-card w-full flex-grow'):
-                ui.label('SENSOR HISTORY').classes('text-gray-400 text-xs font-bold tracking-widest')
-                battery_chart = ui.echart({
-                    'grid': {'top': '20%', 'bottom': '10%', 'left': '5%', 'right': '5%'},
-                    'xAxis': {'type': 'category', 'data': [str(i) for i in range(20)], 'axisLine': {'lineStyle': {'color': '#555'}}},
-                    'yAxis': {'type': 'value', 'splitLine': {'lineStyle': {'color': '#333'}}, 'axisLabel': {'color': '#888'}},
-                    'series': [{'type': 'line', 'data': [0]*20, 'smooth': True, 'showSymbol': False, 'color': '#f59e0b', 'areaStyle': {'opacity': 0.2}}]
-                }).classes('w-full h-full')
+                with ui.card().classes('glass-card w-2/3 p-3'):
+                    ui.label('WHEEL ENCODERS').classes('text-gray-400 text-xs font-bold tracking-widest mb-2')
+                    with ui.row().classes('w-full justify-between gap-1'):
+                        with ui.column().classes('items-center gap-0 w-[48%] bg-black/30 p-2 rounded'):
+                            ui.label('Front L').classes('text-[10px] text-gray-500')
+                            encoder_labels[0] = ui.label('0').classes('text-sm text-cyan-400 font-mono')
+                        with ui.column().classes('items-center gap-0 w-[48%] bg-black/30 p-2 rounded'):
+                            ui.label('Front R').classes('text-[10px] text-gray-500')
+                            encoder_labels[2] = ui.label('0').classes('text-sm text-cyan-400 font-mono')
+                        with ui.column().classes('items-center gap-0 w-[48%] bg-black/30 p-2 rounded'):
+                            ui.label('Rear L').classes('text-[10px] text-gray-500')
+                            encoder_labels[1] = ui.label('0').classes('text-sm text-cyan-400 font-mono')
+                        with ui.column().classes('items-center gap-0 w-[48%] bg-black/30 p-2 rounded'):
+                            ui.label('Rear R').classes('text-[10px] text-gray-500')
+                            encoder_labels[3] = ui.label('0').classes('text-sm text-cyan-400 font-mono')
 
         with ui.column().classes('w-1/4 h-full gap-4'):
             
@@ -1031,24 +1012,6 @@ def main_page():
                     ui.label('Autonomous').classes('text-gray-400')
                     ui.switch(on_change=lambda e: toggle_autonomous(e.value)).classes('text-cyan-400')
             
-
-            # Encoder Data Display
-            with ui.card().classes('glass-card w-full p-3'):
-                ui.label('WHEEL ENCODERS').classes('text-gray-400 text-xs font-bold tracking-widest mb-2')
-                with ui.row().classes('w-full justify-between gap-1'):
-                    with ui.column().classes('items-center gap-0 w-[48%] bg-black/30 p-2 rounded'):
-                        ui.label('Front L').classes('text-[10px] text-gray-500')
-                        encoder_labels[0] = ui.label('0').classes('text-sm text-cyan-400 font-mono')
-                    with ui.column().classes('items-center gap-0 w-[48%] bg-black/30 p-2 rounded'):
-                        ui.label('Front R').classes('text-[10px] text-gray-500')
-                        encoder_labels[2] = ui.label('0').classes('text-sm text-cyan-400 font-mono')
-                    with ui.column().classes('items-center gap-0 w-[48%] bg-black/30 p-2 rounded'):
-                        ui.label('Rear L').classes('text-[10px] text-gray-500')
-                        encoder_labels[1] = ui.label('0').classes('text-sm text-cyan-400 font-mono')
-                    with ui.column().classes('items-center gap-0 w-[48%] bg-black/30 p-2 rounded'):
-                        ui.label('Rear R').classes('text-[10px] text-gray-500')
-                        encoder_labels[3] = ui.label('0').classes('text-sm text-cyan-400 font-mono')
-
             
 
     ui.timer(1.0, update_connection_status)
