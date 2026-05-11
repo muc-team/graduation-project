@@ -451,6 +451,9 @@ def render_rviz_map():
         img[data == 0] = [254, 254, 254]    # Free = almost white
         img[data == 100] = [0, 0, 0]        # Occupied = black
         
+        # Flip image vertically so +Y is up (matching robot's ry projection)
+        img = np.flipud(img)
+        
         # Scale up for better visibility
         scale = max(2, min(4, 600 // max(w, h)))
         img = cv2.resize(img, (w * scale, h * scale), interpolation=cv2.INTER_NEAREST)
