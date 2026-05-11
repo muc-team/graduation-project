@@ -4,11 +4,27 @@
 
 | | Robot 1 (Alpha) | Robot 2 (Beta) |
 |---|---|---|
-| **Sensors** | LiDAR (RPLiDAR A1) | 4× wheel encoders, camera |
-| **Localization** | SLAM Toolbox → accurate pose | None (raw encoder counts only) |
+| **Sensors** | LiDAR (RPLiDAR A1) | 4× wheel encoders, camera, IMU (GY-87) |
+| **Localization** | SLAM Toolbox → accurate pose | Encoder Odom + IMU Fusion (EKF) |
 | **Map** | Builds and publishes `/map` | No map awareness |
 | **Connection** | ROS 2 + rosbridge on `robot.local` | ROS 2 + rosbridge on `robot2.local` |
-| **IMU** | None | Available (10-DOF, not yet wired) |
+| **IMU** | None | GY-87 10-DOF (Connected to Arduino Mega) |
+
+## IMU (GY-87) Connection Details
+
+The **GY-87 10-DOF module** (includes MPU6050, HMC5883L, and BMP180) communicates via **I2C**.
+
+### Wiring: GY-87 to Arduino Mega 2560
+
+| GY-87 Pin | Arduino Mega 2560 Pin | Note |
+| :--- | :--- | :--- |
+| **VCC** | 5V | Power supply |
+| **GND** | GND | Ground |
+| **SDA** | 20 (SDA) | I2C Data |
+| **SCL** | 21 (SCL) | I2C Clock |
+
+> [!NOTE]
+> The Arduino Mega 2560 has dedicated I2C pins at 20 (SDA) and 21 (SCL). Do not use the analog pins A4/A5 which are used for I2C on the Arduino Uno/Nano.
 
 ## Goal
 
@@ -115,12 +131,10 @@ Create a ROS 2 node on Robot 2's Pi that converts raw encoder ticks into proper 
 
 **Deliverable:** Robot 2 publishes a proper odometry topic that any ROS tool can consume.
 
----
-
 ### Phase 2: Add IMU + EKF Fusion (Recommended)
 **Effort**: ~3-4 hours | **Risk**: Medium
 
-Wire the 10-DOF IMU to Robot 2's Raspberry Pi (I2C). Create a node that publishes `/robot2/imu` (`sensor_msgs/Imu`).
+Wire the GY-87 10-DOF IMU to your Arduino Mega 2560 (I2C). Create a node that publishes `/robot2/imu` (`sensor_msgs/Imu`) to the Raspberry Pi.
 
 Use the `robot_localization` package's Extended Kalman Filter to fuse:
 - Encoder odometry → position + velocity
@@ -134,8 +148,6 @@ Use the `robot_localization` package's Extended Kalman Filter to fuse:
 
 **Deliverable:** A fused `/robot2/odom` that is significantly more accurate than encoders alone.
 
----
-
 ### Phase 3: Dashboard Multi-Robot Map
 **Effort**: ~3 hours | **Risk**: Low
 
@@ -146,8 +158,6 @@ Modify `dash_mapping.py` to:
 4. Show both robots' positions, headings, and trails
 
 **Deliverable:** Single map view showing both robots in real-time.
-
----
 
 ### Phase 4: Clean Up Robot 1 (Remove Camera)
 **Effort**: ~15 min | **Risk**: None
@@ -174,8 +184,7 @@ Update `start_robot1.sh` to ensure no camera service starts. Already done in the
 1. **Wheel diameter** — measure one wheel in millimeters
 2. **Wheelbase** — distance between left wheel center and right wheel center (mm)
 3. **Encoder CPR** — counts per full wheel revolution (spin wheel by hand and read the encoder count)
-4. **IMU model** — exact chip name (MPU9250? BNO055? GY-87?) so I can write the correct driver
-5. **Starting position** — will both robots always start from the same spot?
+4. **Starting position** — will both robots always start from the same spot?
 
 ---
 
