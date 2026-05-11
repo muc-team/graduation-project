@@ -68,7 +68,9 @@ class Robot2Bridge(Node):
 
         # ── Timers ──
         self.create_timer(0.1, self._check_manual_timeout)
-        self.create_timer(0.1, self._poll_status)  # Poll Arduino for STS: data (old firmware compat)
+        # Note: No _poll_status timer — Robot 2 firmware streams D: packets
+        # at 50 Hz automatically. Sending '?' would trigger printHelp() and
+        # flood the serial buffer with junk text.
 
         # ── Serial Reader Thread ──
         self._reader_thread = threading.Thread(target=self._serial_reader, daemon=True)
