@@ -152,10 +152,18 @@ autonomous_mode = False
 manual_topic = None
 _publishers_setup = False
 explore_topic = None
+goal_topic = None
+nav_status_listener = None
+
+# Navigation goal state
+nav_goal = {'x': None, 'y': None}
+nav_status = 'IDLE'
+nav_status_label = None
 
 def setup_publishers():
     """Setup ROS publishers and additional subscribers after connection."""
     global manual_topic, explore_topic, odom_listener, scan_listener
+    global goal_topic, nav_status_listener
     if client.is_connected:
         manual_topic = roslibpy.Topic(client, '/manual_cmd', 'geometry_msgs/Twist')
         manual_topic.advertise()
@@ -163,12 +171,20 @@ def setup_publishers():
         explore_topic = roslibpy.Topic(client, '/explore_enable', 'std_msgs/Bool')
         explore_topic.advertise()
         
+        # Goal pose publisher (for click-to-navigate)
+        goal_topic = roslibpy.Topic(client, '/goal_pose', 'geometry_msgs/PoseStamped')
+        goal_topic.advertise()
+        
         # Subscribe to odom and scan for RViz-style map
         odom_listener = roslibpy.Topic(client, '/odom', 'nav_msgs/Odometry')
         odom_listener.subscribe(pose_callback)
         
         scan_listener = roslibpy.Topic(client, '/scan', 'sensor_msgs/LaserScan')
         scan_listener.subscribe(scan_callback)
+        
+        # Subscribe to navigation status from robot2_goto
+        nav_status_listener = roslibpy.Topic(client, '/nav_status', 'std_msgs/String')
+        nav_status_listener.subscribe(nav_status_callback)
         
         # Start render timer
         start_map_render_timer()
@@ -284,10 +300,11 @@ def swap_model(new_model_name: str):
 def swap_robot(new_ip: str):
     """Switch to a different robot by reconnecting ROS/ZMQ or ESP32 HTTP."""
     global RASPBERRY_IP, client, connection_notified, _publishers_setup
-    global manual_topic, explore_topic
+    global manual_topic, explore_topic, goal_topic, nav_status_listener
     global map_listener, gas_listener, listener, battery_listener, encoders_listener
     global odom_listener, scan_listener, status_listener
     global latest_frame_b64, latest_map_b64
+    global nav_goal, nav_status
 
     if new_ip == RASPBERRY_IP:
         return
@@ -303,6 +320,8 @@ def swap_robot(new_ip: str):
     # Reset shared state
     manual_topic = None
     explore_topic = None
+    goal_topic = None
+    nav_status_listener = None
     odom_listener = None
     scan_listener = None
     status_listener = None
@@ -310,6 +329,8 @@ def swap_robot(new_ip: str):
     _publishers_setup = False
     latest_frame_b64 = None
     latest_map_b64 = None
+    nav_goal = {'x': None, 'y': None}
+    nav_status = 'IDLE'
     _esp32_connected.clear()
 
     # Update IP
@@ -376,6 +397,52 @@ def swap_robot(new_ip: str):
 map_info = {'width': 0, 'height': 0, 'resolution': 0.05, 'origin_x': 0, 'origin_y': 0, 'data': None}
 robot_pose = {'x': 0, 'y': 0, 'theta': 0}
 laser_points = []
+
+def nav_status_callback(msg):
+    """Receive navigation status from robot2_goto node."""
+    global nav_status
+    nav_status = msg.get('data', 'IDLE')
+
+def handle_map_click(e):
+    """Handle click on SLAM map to send navigation goal."""
+    global nav_goal
+    if not e.args or e.args.get('type') != 'mousedown':
+        return
+    # Get click coordinates within the image
+    click_x = e.args.get('image_x', 0)
+    click_y = e.args.get('image_y', 0)
+    
+    w = map_info['width']
+    h = map_info['height']
+    res = map_info['resolution']
+    origin_x = map_info['origin_x']
+    origin_y = map_info['origin_y']
+    
+    if w == 0 or h == 0 or res == 0:
+        return
+    
+    # Compute the scale factor used in render_rviz_map
+    scale = max(2, min(4, 600 // max(w, h)))
+    
+    # Convert pixel coordinates to world coordinates
+    world_x = origin_x + (click_x / scale) * res
+    world_y = origin_y + (h - click_y / scale) * res
+    
+    nav_goal['x'] = world_x
+    nav_goal['y'] = world_y
+    
+    # Publish goal to ROS
+    if goal_topic and client.is_connected:
+        goal_topic.publish(roslibpy.Message({
+            'header': {'stamp': {'sec': 0, 'nanosec': 0}, 'frame_id': 'odom'},
+            'pose': {
+                'position': {'x': world_x, 'y': world_y, 'z': 0.0},
+                'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}
+            }
+        }))
+        ui.notify(f'🎯 Goal sent: ({world_x:.2f}, {world_y:.2f})', type='positive')
+    else:
+        ui.notify('Not connected to robot', type='warning')
 
 def map_callback(msg):
     """Store map data for rendering."""
@@ -469,7 +536,7 @@ def render_rviz_map():
             if 0 <= lx < w * scale and 0 <= ly < h * scale:
                 cv2.circle(img, (lx, ly), max(1, scale // 2), (0, 0, 255), -1)
         
-        # Draw robot (green rectangle with direction arrow - like RViz)
+        # Draw robot (green circle with direction arrow - like RViz)
         robot_size = int(0.23 / res * scale)  # 23cm robot radius
         if 0 <= rx < w * scale and 0 <= ry < h * scale:
             # Robot body (filled green circle like RViz default)
@@ -481,6 +548,28 @@ def render_rviz_map():
             ax = int(rx + arrow_len * np.cos(-robot_pose['theta']))
             ay = int(ry + arrow_len * np.sin(-robot_pose['theta']))
             cv2.arrowedLine(img, (rx, ry), (ax, ay), (0, 255, 255), max(2, scale), tipLength=0.4)
+        
+        # Draw navigation goal marker (red crosshair)
+        if nav_goal['x'] is not None and nav_goal['y'] is not None:
+            gx = int((nav_goal['x'] - origin_x) / res * scale)
+            gy = int((h - (nav_goal['y'] - origin_y) / res) * scale)
+            if 0 <= gx < w * scale and 0 <= gy < h * scale:
+                cross_size = max(8, robot_size)
+                # Red crosshair
+                cv2.line(img, (gx - cross_size, gy), (gx + cross_size, gy), (0, 0, 255), 2)
+                cv2.line(img, (gx, gy - cross_size), (gx, gy + cross_size), (0, 0, 255), 2)
+                # Red circle
+                cv2.circle(img, (gx, gy), cross_size // 2, (0, 0, 255), 2)
+                
+                # Draw line from robot to goal (yellow dashed-like)
+                if 0 <= rx < w * scale and 0 <= ry < h * scale:
+                    cv2.line(img, (rx, ry), (gx, gy), (0, 200, 255), 1, cv2.LINE_AA)
+        
+        # Draw nav status text on map
+        if nav_status and nav_status != 'IDLE':
+            status_text = nav_status.split(':')[0]
+            cv2.putText(img, status_text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6, (0, 200, 255), 2, cv2.LINE_AA)
         
         # Encode to base64
         _, buffer = cv2.imencode('.png', img)
@@ -907,7 +996,12 @@ def main_page():
             
             with ui.card().classes('glass-card w-full h-1/3 p-0 relative bg-gray-900 border-2 border-green-900'):
                 ui.label('SLAM MAP').classes('absolute top-3 left-3 z-10 text-black bg-white px-2 py-0.5 text-xs rounded font-bold shadow-lg')
-                map_image = ui.interactive_image().classes('w-full h-full object-contain')
+                # Click on map to set navigation goal
+                map_image = ui.interactive_image(
+                    on_mouse=handle_map_click,
+                    events=['mousedown'],
+                    cross=True
+                ).classes('w-full h-full object-contain')
 
             # Manual Control Panel
             with ui.card().classes('glass-card w-full p-4'):

@@ -26,7 +26,17 @@ tmux send-keys -t $SESSION "$ROS_SOURCE; ros2 launch rosbridge_server rosbridge_
 tmux split-window -h -t $SESSION
 tmux send-keys -t $SESSION "cd $DIR/../classification && python3 tcp_rasp.py; exec bash" C-m
 
+# 4. ODOMETRY (Fuses encoders + IMU → /odom)
+tmux split-window -v -t $SESSION
+tmux send-keys -t $SESSION "$ROS_SOURCE; cd $DIR/../navigation && python3 robot2_odom.py; exec bash" C-m
+
+# 5. GOTO NAVIGATOR (Listens for /goal_pose → drives to it)
+tmux split-window -v -t $SESSION
+tmux send-keys -t $SESSION "$ROS_SOURCE; cd $DIR/../navigation && python3 robot2_goto.py; exec bash" C-m
+
 tmux select-layout -t $SESSION tiled
 
 echo "✅ Robot 2 (Beta) Started in tmux session: $SESSION"
+echo "   Nodes: bridge | rosbridge | camera | odom | goto"
 echo "To view logs: tmux attach -t $SESSION"
+
