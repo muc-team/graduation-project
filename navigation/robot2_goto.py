@@ -57,6 +57,8 @@ class Robot2GoTo(Node):
             PoseStamped, '/goal_pose', self._goal_cb, 10)
         self.create_subscription(
             Odometry, '/odom', self._odom_cb, 10)
+        self.create_subscription(
+            Twist, '/manual_cmd', self._manual_cb, 10)
 
         # ── Publishers ──
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -108,6 +110,12 @@ class Robot2GoTo(Node):
         self.get_logger().info(
             f'📍 New goal: ({self.goal_x:.2f}, {self.goal_y:.2f})')
         self._publish_status(STATE_ROTATING)
+
+    def _manual_cb(self, msg: Twist):
+        """If user manually drives or stops, cancel the goal."""
+        if self.has_goal:
+            self.get_logger().info('🛑 Manual override! Cancelling goal.')
+            self.cancel_goal()
 
     # ─────────────────────────────────────
     # NAVIGATION LOOP

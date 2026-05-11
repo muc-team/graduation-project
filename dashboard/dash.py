@@ -250,8 +250,9 @@ def turn_right():
     update_action("Turning Right")
 
 def stop_robot():
-    global held_key
+    global held_key, nav_goal
     held_key = None
+    nav_goal = {'x': None, 'y': None}
     send_twist(0, 0)
     update_action("Stopped")
 
@@ -406,11 +407,11 @@ def nav_status_callback(msg):
 def handle_map_click(e):
     """Handle click on SLAM map to send navigation goal."""
     global nav_goal
-    if not e.args or e.args.get('type') != 'mousedown':
+    if e.type != 'mousedown':
         return
     # Get click coordinates within the image
-    click_x = e.args.get('image_x', 0)
-    click_y = e.args.get('image_y', 0)
+    click_x = e.image_x
+    click_y = e.image_y
     
     w = map_info['width']
     h = map_info['height']
