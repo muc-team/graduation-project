@@ -47,8 +47,14 @@
 // ║                  2.  I2C DEVICE ADDRESSES                         ║
 // ╚═══════════════════════════════════════════════════════════════════╝
 #define ADDR_MPU6050    0x68
-#define ADDR_HMC5883L   0x1E
+#define ADDR_HMC5883L   0x1E    // Honeywell original
+#define ADDR_QMC5883L   0x0D    // QST clone (common in modern GY-87)
 #define ADDR_BMP180     0x77
+
+// Magnetometer chip type (auto-detected)
+#define MAG_NONE      0
+#define MAG_HMC5883L  1
+#define MAG_QMC5883L  2
 
 // ╔═══════════════════════════════════════════════════════════════════╗
 // ║                  3.  SENSOR CONFIGURATION                         ║
@@ -63,10 +69,20 @@
 //   gyro:  raw * (500.0/32768.0) = °/s    →  ≈ 65.5 LSB / (°/s)
 //   accel: raw * (4.0 /32768.0) = g       →  ≈ 8192 LSB / g
 
-// --- HMC5883L -------------------------------------------------------
-#define MAG_CONFIG_A    0x78    // 8-sample average, 75 Hz output rate
-#define MAG_CONFIG_B    0x20    // Gain ±1.3 Gauss   (1090 LSB/Gauss)
-#define MAG_MODE_REG    0x00    // Continuous measurement mode
+// --- HMC5883L (Honeywell original) ----------------------------------
+#define HMC_CONFIG_A    0x78    // 8-sample average, 75 Hz output rate
+#define HMC_CONFIG_B    0x20    // Gain ±1.3 Gauss   (1090 LSB/Gauss)
+#define HMC_MODE_REG    0x00    // Continuous measurement mode
+
+// --- QMC5883L (QST clone) -------------------------------------------
+//  Control 1 (0x09):
+//    OSR=512(00) | RNG=8G(01) | ODR=200Hz(11) | MODE=Continuous(01)
+//    → 0b00011101 = 0x1D
+//  Control 2 (0x0A): soft-reset bit cleared, interrupt enabled = 0x01
+//  SET/RESET period (0x0B): recommended value = 0x01
+#define QMC_CONFIG_1    0x1D
+#define QMC_CONFIG_2    0x01
+#define QMC_PERIOD      0x01
 
 // --- BMP180 ---------------------------------------------------------
 #define BMP_OSS         1       // Oversampling: 0(fast) … 3(precise)
@@ -111,10 +127,12 @@ int32_t  bmp_UT = 0;             // raw temperature
 int32_t  bmp_UP = 0;             // raw pressure
 
 // System status flags
-bool mpuOK   = false;
-bool magOK   = false;
-bool baroOK  = false;
-bool verbose = false;
+bool mpuOK    = false;
+bool magOK    = false;
+bool baroOK   = false;
+bool baroReady = false;     // becomes true after first valid baro reading
+uint8_t magType = MAG_NONE; // MAG_HMC5883L or MAG_QMC5883L
+bool verbose  = false;
 
 // Motor control state
 int  pwmSpeed       = 150;
@@ -245,32 +263,75 @@ void mpuCalibrateGyro() {
 }
 
 // ╔═══════════════════════════════════════════════════════════════════╗
-// ║                  9.  HMC5883L MAGNETOMETER DRIVER                 ║
+// ║                  9.  MAGNETOMETER DRIVER (HMC + QMC)              ║
 // ╚═══════════════════════════════════════════════════════════════════╝
+//   Auto-detects whether the on-board chip is a Honeywell HMC5883L
+//   (address 0x1E) or a QST QMC5883L (address 0x0D). Most modern GY-87
+//   clones ship with QMC5883L.
 
-bool magInit() {
-    if (!i2cDeviceExists(ADDR_HMC5883L)) return false;
-
+bool hmcInit() {
     // Verify ID  ("H43" → 0x48,0x34,0x33 in registers 10/11/12)
     uint8_t id[3];
     if (!i2cReadBytes(ADDR_HMC5883L, 0x0A, id, 3)) return false;
     if (id[0] != 0x48 || id[1] != 0x34 || id[2] != 0x33) return false;
 
-    i2cWrite(ADDR_HMC5883L, 0x00, MAG_CONFIG_A);
-    i2cWrite(ADDR_HMC5883L, 0x01, MAG_CONFIG_B);
-    i2cWrite(ADDR_HMC5883L, 0x02, MAG_MODE_REG);
+    i2cWrite(ADDR_HMC5883L, 0x00, HMC_CONFIG_A);
+    i2cWrite(ADDR_HMC5883L, 0x01, HMC_CONFIG_B);
+    i2cWrite(ADDR_HMC5883L, 0x02, HMC_MODE_REG);
     delay(6);
     return true;
 }
 
+bool qmcInit() {
+    // Soft reset
+    i2cWrite(ADDR_QMC5883L, 0x0A, 0x80);
+    delay(10);
+    // Configure (period + control)
+    i2cWrite(ADDR_QMC5883L, 0x0B, QMC_PERIOD);
+    i2cWrite(ADDR_QMC5883L, 0x0A, QMC_CONFIG_2);
+    i2cWrite(ADDR_QMC5883L, 0x09, QMC_CONFIG_1);
+    delay(10);
+
+    // Verify by reading status — should be reachable
+    Wire.beginTransmission(ADDR_QMC5883L);
+    Wire.write(0x06);
+    if (Wire.endTransmission(false) != 0) return false;
+    Wire.requestFrom((uint8_t)ADDR_QMC5883L, (uint8_t)1);
+    return Wire.available() > 0;
+}
+
+bool magInit() {
+    // Try Honeywell first
+    if (i2cDeviceExists(ADDR_HMC5883L) && hmcInit()) {
+        magType = MAG_HMC5883L;
+        return true;
+    }
+    // Fall back to QST clone
+    if (i2cDeviceExists(ADDR_QMC5883L) && qmcInit()) {
+        magType = MAG_QMC5883L;
+        return true;
+    }
+    magType = MAG_NONE;
+    return false;
+}
+
 void magRead() {
     uint8_t b[6];
-    if (!i2cReadBytes(ADDR_HMC5883L, 0x03, b, 6)) return;
 
-    // HMC5883L register order is X, Z, Y (unusual!)
-    mx = ((int16_t)b[0] << 8) | b[1];
-    mz = ((int16_t)b[2] << 8) | b[3];
-    my = ((int16_t)b[4] << 8) | b[5];
+    if (magType == MAG_HMC5883L) {
+        if (!i2cReadBytes(ADDR_HMC5883L, 0x03, b, 6)) return;
+        // HMC5883L register order: X, Z, Y  (big-endian)
+        mx = ((int16_t)b[0] << 8) | b[1];
+        mz = ((int16_t)b[2] << 8) | b[3];
+        my = ((int16_t)b[4] << 8) | b[5];
+    }
+    else if (magType == MAG_QMC5883L) {
+        if (!i2cReadBytes(ADDR_QMC5883L, 0x00, b, 6)) return;
+        // QMC5883L register order: X, Y, Z  (little-endian!)
+        mx = ((int16_t)b[1] << 8) | b[0];
+        my = ((int16_t)b[3] << 8) | b[2];
+        mz = ((int16_t)b[5] << 8) | b[4];
+    }
 }
 
 // ╔═══════════════════════════════════════════════════════════════════╗
@@ -362,6 +423,7 @@ void baroUpdate() {
             X1 = (X1 * 3038) >> 16;
             X2 = (-7357 * p) >> 16;
             baroPressurePa = p + ((X1 + X2 + 3791) >> 4);
+            baroReady = true;          // first valid reading now available
 
             bmp_state = 0;   // ready for next cycle
             break;
@@ -431,7 +493,10 @@ void printStatus() {
     Serial.print(F(" Watchdog       : ")); Serial.println(watchdogActive ? F("ON") : F("OFF"));
     Serial.println();
     Serial.print(F(" MPU6050        : ")); Serial.println(mpuOK  ? F("OK") : F("FAIL"));
-    Serial.print(F(" HMC5883L       : ")); Serial.println(magOK  ? F("OK") : F("FAIL"));
+    Serial.print(F(" Magnetometer   : "));
+    if      (magType == MAG_HMC5883L) Serial.println(F("OK (HMC5883L)"));
+    else if (magType == MAG_QMC5883L) Serial.println(F("OK (QMC5883L)"));
+    else                              Serial.println(F("FAIL"));
     Serial.print(F(" BMP180         : ")); Serial.println(baroOK ? F("OK") : F("FAIL"));
     Serial.println();
     Serial.print(F(" Gyro offsets   : ")); Serial.print(gxOff);
@@ -647,15 +712,32 @@ void setup() {
     Serial.print(F("[INIT] I2C bus              : OK  ("));
     Serial.print(I2C_CLOCK / 1000); Serial.println(F(" kHz)"));
 
+    // --- I2C scanner: list every responding device ---
+    Serial.print(F("[SCAN] I2C devices found    :"));
+    uint8_t devCount = 0;
+    for (uint8_t addr = 1; addr < 127; addr++) {
+        Wire.beginTransmission(addr);
+        if (Wire.endTransmission() == 0) {
+            Serial.print(F(" 0x"));
+            if (addr < 0x10) Serial.print('0');
+            Serial.print(addr, HEX);
+            devCount++;
+        }
+    }
+    if (devCount == 0) Serial.print(F(" (none — check wiring!)"));
+    Serial.println();
+
     // --- MPU6050 ---
     mpuOK = mpuInit();
     Serial.print(F("[INIT] MPU6050  (Gyro/Accel): "));
     Serial.println(mpuOK ? F("OK") : F("FAIL"));
 
-    // --- HMC5883L ---
+    // --- Magnetometer (auto-detect HMC5883L vs QMC5883L) ---
     magOK = magInit();
-    Serial.print(F("[INIT] HMC5883L (Magneto)   : "));
-    Serial.println(magOK ? F("OK") : F("FAIL"));
+    Serial.print(F("[INIT] Magnetometer         : "));
+    if      (magType == MAG_HMC5883L) Serial.println(F("OK  (HMC5883L @ 0x1E)"));
+    else if (magType == MAG_QMC5883L) Serial.println(F("OK  (QMC5883L @ 0x0D)"));
+    else                              Serial.println(F("FAIL  (no chip at 0x1E or 0x0D)"));
 
     // --- BMP180 ---
     baroOK = baroInit();
@@ -709,8 +791,8 @@ void loop() {
         streamHighRate();
     }
 
-    // ---- 6. Stream barometer (low rate) ----
-    if (baroOK && now - lastBaro >= BARO_PERIOD_MS) {
+    // ---- 6. Stream barometer (low rate, after first valid reading) ----
+    if (baroOK && baroReady && now - lastBaro >= BARO_PERIOD_MS) {
         lastBaro = now;
         streamBaro();
     }
